@@ -1,0 +1,46 @@
+{
+  "name": "aipool",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Multi-account proxy for Claude Code and Codex: pools Claude Max, ChatGPT/Codex, API-key and third-party backend accounts, and rotates on quota.",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "aipool": "src/index.js"
+  },
+  "files": [
+    "src/"
+  ],
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test --test-timeout=120000",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json",
+    "typecheck:strict": "node scripts/typecheck-strict.mjs"
+  },
+  "keywords": [
+    "claude",
+    "anthropic",
+    "claude-code",
+    "codex",
+    "openai",
+    "chatgpt",
+    "deepseek",
+    "proxy",
+    "load-balancer",
+    "multi-account",
+    "quota",
+    "rate-limiting",
+    "cli"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "eslint": "^9.0.0",
+    "typescript": "5.9.2"
+  },
+  "author": "shindonghwi"
+}
