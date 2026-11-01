@@ -146,3 +146,57 @@ test('expiry routing, when on, is named in the header', () => {
   assert.doesNotMatch(render(status()), /soonest-expiring/);
   assert.match(render(status({ expiryRouting: { enabled: true, tolerance: 1.5 } })), /spending soonest-expiring quota first/);
 });
+
+test('a pool with both providers lists each under its own heading', () => {
+  const s = status();
+  s.accounts.push(
+    { name: 'b@example.com (codex)', type: 'oauth', provider: 'codex', quota: { unified5h: 0.05, unified7d: 0.1 } },
+    { name: 'x@example.com', type: 'oauth', provider: 'codex', unavailable: 'quota', quota: { unified7d: 1, unified7dReset: inMs(5 * H) } },
+  );
+  const out = render(s);
+  assert.match(out, /^Claude · 2 of 4 available$/m);
+  assert.match(out, /^Codex · 1 of 2 available$/m);
+  assert.match(out, /up 5m\n\nClaude · /, 'the first heading is set off from the header');
+  const claude = out.indexOf('\nClaude'), codex = out.indexOf('\nCodex');
+  assert.ok(claude > 0 && codex > claude, out);
+  // Each account sits under its own provider, in the usual most-useful order.
+  for (const n of ['b', 'c', 'a', 'off']) {
+    const at = out.indexOf(`${n}@example.com `);
+    assert.ok(at > claude && at < codex, `${n} under Claude:\n${out}`);
+  }
+  assert.ok(out.indexOf('b@example.com (codex)') > codex);
+  assert.ok(out.indexOf('x@example.com') > out.indexOf('b@example.com (codex)'));
+  // The weekly average stays within a provider: Claude's three, Codex's two.
+  assert.match(out, /Claude · 2 of 4 available\nFleet weekly .* 71% used · average of 3 enabled accounts/);
+  assert.match(out, /Codex · 1 of 2 available\nFleet weekly .* 55% used · average of 2 enabled accounts/);
+  assert.equal(out.match(/Fleet weekly/g).length, 2);
+});
+
+test('a provider with nothing left says when its first account is back', () => {
+  const s = status();
+  s.accounts.push({ name: 'x@example.com', type: 'oauth', provider: 'codex', unavailable: 'quota', quota: { unified7d: 1, unified7dReset: inMs(5 * H) } });
+  assert.match(render(s), /^Codex · none available — next back in 5h$/m);
+});
+
+test('a single-provider pool has no provider heading', () => {
+  const out = render(status());
+  assert.doesNotMatch(out, /^(Claude|Codex)\b/m);
+  const codexOnly = status();
+  codexOnly.accounts = codexOnly.accounts.map(a => ({ ...a, provider: 'codex' }));
+  assert.doesNotMatch(render(codexOnly), /^(Claude|Codex)\b/m);
+});
+
+test('a Codex account that reports no 5h window draws no 5h bar', () => {
+  const s = status();
+  s.accounts.push(
+    { name: 'wk@example.com', type: 'oauth', provider: 'codex', quota: { unified7d: 0.01, unified7dReset: inMs(6 * 24 * H) } },
+    { name: 'both@example.com', type: 'oauth', provider: 'codex', quota: { unified5h: 0.3, unified7d: 0.1 } },
+  );
+  const out = render(s);
+  assert.doesNotMatch(cardOf(out, 'wk'), /5h/);
+  assert.match(cardOf(out, 'wk'), /Weekly {2}\[.*\] {3}1%  resets in 6d/);
+  // A plan that does report a 5h window keeps the row.
+  assert.match(cardOf(out, 'both'), /5h {6}\[.*\]  30%/);
+  // A Claude account without a 5h reading still says it has none yet.
+  assert.match(cardOf(out, 'off'), /5h {6}\[·{30}\] {4}–  no reading yet/);
+});

@@ -78,7 +78,7 @@ const splits = (am, width) => listLines(screen(am, width).lines)[0].includes('�
 test('a mixed pool at a wide terminal is two panes, as tall as the larger pool', () => {
   const am = fleet([claude('a@x.com'), claude('b@x.com'), claude('c@x.com'), codex('k1@x.com'), codex('k2@x.com')]);
   const { lines } = screen(am, 160);
-  assert.match(listLines(lines)[0], /^ Anthropic ─+ │  Codex ─+\s*$/);
+  assert.match(listLines(lines)[0], /^ Claude ─+ │  Codex ─+\s*$/);
   const rows = accountRows(lines);
   assert.equal(rows.length, 3, 'three rows: the larger pool');
   const [left, right] = halves(rows[0]);
@@ -212,8 +212,8 @@ test('a narrow terminal keeps one column, grouped by provider, each row named', 
   assert.equal(listLines(lines)[0].trim(), '', 'no pane titles');
   const rows = accountRows(lines);
   assert.equal(rows.length, 3);
-  assert.match(rows[0], /a@x\.com\s+Anthropic/);
-  assert.match(rows[1], /b@x\.com\s+Anthropic/);
+  assert.match(rows[0], /a@x\.com\s+Claude/);
+  assert.match(rows[1], /b@x\.com\s+Claude/);
   assert.match(rows[2], /k1@x\.com\s+Codex/);
   assert.ok(!rows.some(r => r.includes('│')));
   assert.equal(currentNames(rows).length, 2, 'both pools mark their current account');
@@ -282,7 +282,7 @@ test('attach mode draws the same panes from a status payload', () => {
   const rm = new RemoteAccountManager();
   rm.applyStatus(JSON.parse(JSON.stringify(am.getStatus())));
   const { lines } = screen(rm, 160, { remote: true });
-  assert.match(listLines(lines)[0], /Anthropic ─+ │  Codex/);
+  assert.match(listLines(lines)[0], /Claude ─+ │  Codex/);
   const rows = accountRows(lines);
   assert.deepEqual(currentNames(rows.map(r => halves(r)[0])), ['b@x.com']);
   assert.deepEqual(currentNames(rows.map(r => halves(r)[1])), ['me@x.com'], 'the Codex namesake, not the Claude one');

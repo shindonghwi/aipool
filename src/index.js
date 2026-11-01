@@ -26,6 +26,7 @@ import { syncAccountsFromDisk } from './sync-accounts.js';
 import { mergeAccountsForSave, syncRefreshedTokens, removedAccountIds, clearRemovedAccountIds } from './account-pairing.js';
 import { ensureAccountIds } from './account-id.js';
 import * as alias from './alias.js';
+import { peerCommand } from './peer.js';
 import { ensureCerts, mitmHosts } from './mitm.js';
 import { Prober } from './prober.js';
 import { Warmer } from './warmer.js';
@@ -156,6 +157,9 @@ switch (command) {
   case 'alias':
     aliasCommand();
     process.exit(0);
+    break;
+  case 'peer':
+    process.exit(await peerCommand(args.slice(1)));
     break;
   case 'service':
     await serviceCommand();
@@ -2250,6 +2254,10 @@ Commands:
                       Schedule daily warm-up for a target reset in an IANA zone
   warmup rolling HH:MM --timezone Area/City
                       Anchor a continuous five-hour reset cadence in an IANA zone
+  peer <sub>          Message between the Claude Code and Codex sessions on this
+                      machine: list | send <session> <text> [--wait] | read |
+                      wait | whoami | name <thread> <name> | install | uninstall
+                      ('install' adds the hook that wakes Claude sessions)
   api <path>          Call an API endpoint with account credentials
   update              Check npm for a newer aipool and install it
   version             Print the installed version

@@ -19,7 +19,7 @@ import { classificationPath } from './classification-path.js';
 export const PROVIDERS = {
   anthropic: {
     id: 'anthropic',
-    label: 'Anthropic',
+    label: 'Claude',
     upstream: 'https://api.anthropic.com',
     // Anthropic pins the account inside the request body (metadata.user_id),
     // so the body rewrites apply here and only here.

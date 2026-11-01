@@ -2,6 +2,7 @@ import { formatMoney } from './oauth.js';
 import { findFamilyBlock, modelGlobOverlaps, gatingUtilization, resolveMaxUsage, resolveSwitchThreshold, resolveFleetThreshold, switchThresholdDiffs } from './model.js';
 import { safeLine } from './safe-text.js';
 import { ROUTE_COLORS } from './config-ops.js';
+import { PROVIDERS, providerOf } from './provider.js';
 
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
@@ -52,8 +53,11 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
 
   for (const line of routingLines(status.routes, blocked, paint)) lines.push(line);
 
+  // In a pool serving both providers each header names its own, as the TUI's
+  // type column does; one provider would only repeat itself on every row.
+  const mixed = new Set(accounts.map(providerOf)).size > 1;
   for (const account of accounts) {
-    lines.push(renderAccountHeader(account, currentAccount, paint, now, adaptiveMode));
+    lines.push(renderAccountHeader(account, currentAccount, paint, now, adaptiveMode, mixed));
     for (const quotaLine of quotaLines(account, now, paint)) {
       lines.push(`  ${quotaLine}`);
     }
@@ -165,6 +169,15 @@ export function renderStatusCompact(status, { color = process.stdout.isTTY, now 
 
   const names = rows.map(r => nameText(r.account.name));
 
+  // A pool serving both Claude and Codex lists each provider under its own
+  // heading, as the TUI splits them into panes: the two are separate plans, so
+  // an account's standing — and the weekly average — reads against its own
+  // provider's accounts. A single-provider pool keeps the one list.
+  const groups = Object.keys(PROVIDERS)
+    .map(id => ({ id, rows: rows.filter(r => providerOf(r.account) === id) }))
+    .filter(g => g.rows.length);
+  const mixed = groups.length > 1;
+
   // ── Header: can I keep working? ──
   const usable = rows.filter(r => r.rank <= 1).length;
   const head = [paint.bold('AIPool')];
@@ -185,30 +198,39 @@ export function renderStatusCompact(status, { color = process.stdout.isTTY, now 
 
   // The weekly window is the one that runs out, so the fleet's is worth one
   // line: how full the enabled accounts are on average.
-  const weekly = rows
-    .filter(r => r.rank < 4 && r.account.quota?.unified7d != null && Number.isFinite(Number(r.account.quota.unified7d)))
-    .map(r => Number(r.account.quota.unified7d));
-  if (weekly.length > 1) {
-    const avg = weekly.reduce((a, b) => a + b, 0) / weekly.length;
-    lines.push(`${paint.dim('Fleet weekly')} ${usageBar(avg, paint, null, { width: COMPACT_BAR })} ${formatPercent(Math.round(avg * 100) / 100)} used ${paint.dim(`· average of ${weekly.length} enabled accounts`)}`);
-  }
+  const pushFleetWeekly = (/** @type {typeof rows} */ group) => {
+    const weekly = group
+      .filter(r => r.rank < 4 && r.account.quota?.unified7d != null && Number.isFinite(Number(r.account.quota.unified7d)))
+      .map(r => Number(r.account.quota.unified7d));
+    if (weekly.length > 1) {
+      const avg = weekly.reduce((a, b) => a + b, 0) / weekly.length;
+      lines.push(`${paint.dim('Fleet weekly')} ${usageBar(avg, paint, null, { width: COMPACT_BAR })} ${formatPercent(Math.round(avg * 100) / 100)} used ${paint.dim(`· average of ${weekly.length} enabled accounts`)}`);
+    }
+  };
+  if (!mixed) pushFleetWeekly(rows);
   lines.push('');
 
   // ── The accounts: a card each — name and state, then a bar per window ──
   const nameWidth = Math.max(7, ...names.map(n => n.length));
-  rows.forEach((row, i) => {
+  const pushCard = (/** @type {typeof rows[number]} */ row) => {
     const { account } = row;
     const off = row.rank >= 4;
     const tint = row.tint(paint);
     const dot = tint(row.rank === 1 || off ? '○' : '●');
-    const name = off ? paint.gray(names[i].padEnd(nameWidth)) : paint.bold(names[i].padEnd(nameWidth));
+    const shown = nameText(account.name).padEnd(nameWidth);
+    const name = off ? paint.gray(shown) : paint.bold(shown);
     lines.push(`${dot} ${name}  ${tint(row.state)}`);
 
     const q = account.quota || {};
     // An account without the unified windows carries its own figure in the
     // state line; a column of empty bars would say nothing about it.
     const hasWindows = columns.some(({ key }) => q[key] != null);
+    // A Codex plan that reports its weekly window without a 5h one has no 5h
+    // reading coming, so "no reading yet" would wait forever. The TUI drops its
+    // Ses bar on the same signal; an account yet to report keeps the row.
+    const noSession = providerOf(account) === 'codex' && q.unified5h == null && q.unified7d != null;
     for (const { key, label } of hasWindows ? columns : []) {
+      if (key === 'unified5h' && noSession) continue;
       const lbl = paint.dim(label.padEnd(7));
       const used = q[key];
       if (used == null || Number.isNaN(Number(used))) {
@@ -225,7 +247,20 @@ export function renderStatusCompact(status, { color = process.stdout.isTTY, now 
       lines.push(`    ${lbl} ${bar} ${pctTint(formatPercent(used).padStart(4))}  ${paint.dim(`${reset}${capText}`)}`.trimEnd());
     }
     lines.push('');
-  });
+  };
+  for (const group of groups) {
+    if (mixed) {
+      const usable = group.rows.filter(r => r.rank <= 1).length;
+      const next = Math.min(...group.rows.map(r => r.backAt ?? Infinity));
+      const standing = usable
+        ? paint.green(`${usable} of ${group.rows.length} available`)
+        : paint.red(`none available${Number.isFinite(next) ? ` — next back in ${formatDuration(next - now)}` : ''}`);
+      lines.push(`${paint.bold(PROVIDERS[group.id].label)}${sep}${standing}`);
+      pushFleetWeekly(group.rows);
+      lines.push('');
+    }
+    group.rows.forEach(pushCard);
+  }
 
   // ── Needs attention: only what a person should act on or know ──
   const attention = [];
@@ -603,7 +638,7 @@ function formatActive(status, currentAccount, adaptiveMode, paint) {
   return `${named}  ${cursor}`;
 }
 
-function renderAccountHeader(account, currentAccount, paint, now, followSessions = false) {
+function renderAccountHeader(account, currentAccount, paint, now, followSessions = false, showProvider = false) {
   const acctName = nameText(account.name);
   // Under adaptive distribution the marker follows the sessions rather than the
   // cursor, so the accounts flagged here are the ones the fleet is running on.
@@ -616,7 +651,8 @@ function renderAccountHeader(account, currentAccount, paint, now, followSessions
   const sess = sessions
     ? ` ${paint.dim(`${sessions} sess${formatSessionBuckets(account.sessionsByBucket)}`)}`
     : '';
-  return `${marker} ${shown} ${paint.dim(`(${safeLine(account.type, 16)}, prio ${account.priority || 0})`)} ${status}${org}${sess}`;
+  const provider = showProvider ? `${PROVIDERS[providerOf(account)].label}, ` : '';
+  return `${marker} ${shown} ${paint.dim(`(${provider}${safeLine(account.type, 16)}, prio ${account.priority || 0})`)} ${status}${org}${sess}`;
 }
 
 // "2 active / 3 known · distributing" — the running-sessions readout. While a

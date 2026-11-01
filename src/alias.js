@@ -24,7 +24,7 @@ const MARKER = '# aipool alias';
  * @param {string} path
  * @param {string} text
  */
-function writeFileAtomic(path, text) {
+export function writeFileAtomic(path, text) {
   let mode = null;
   try { mode = statSync(path).mode & 0o777; } catch { /* new file: default mode */ }
   const tmp = join(dirname(path), `.${basename(path)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);

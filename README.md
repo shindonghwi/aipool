@@ -38,6 +38,7 @@ aipool run       # 다른 터미널에서: 프록시를 거쳐 Claude Code 실�
 - OAuth 토큰이 만료되기 전에 갱신하고 설정 파일에 다시 씁니다. 클라이언트가 직접 하는 토큰 갱신은 그대로 통과시킵니다.
 - OpenAI Codex 구독도 Claude 계정과 함께 풀로 묶습니다(실험적). Codex CLI는 설정으로, 또는 MITM 프록시를 통해 투명하게 같은 프록시를 거치고, 자기 쿼터에 따라 전환합니다.
 - Anthropic 호환 API(DeepSeek, GLM)를 Claude 계정이 다 떨어졌을 때 쓰는 낮은 우선순위의 대체 수단으로 받아 줍니다.
+- 같은 컴퓨터의 Claude Code 세션과 Codex 세션이 서로 메시지를 주고받게 합니다(`aipool peer`). 쉬고 있는 Claude 세션도 메시지가 오면 깨어납니다.
 - 의존성이 없습니다. Node 내장 모듈만 씁니다.
 
 ## 자주 쓰는 명령
@@ -48,6 +49,7 @@ aipool status            # 실행 중인 프록시의 실시간 상태 (서버�
 aipool disable <name>    # 계정을 지우지 않고 잠시 멈춤
 aipool priority <name> 1 # 로테이션 순서, 낮을수록 우선
 aipool alias --install   # 그냥 `claude`를 실행해도 프록시를 거치게 함
+aipool peer list         # 메시지를 주고받을 수 있는 Claude·Codex 세션
 aipool help              # 나머지 전부
 ```
 

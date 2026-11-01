@@ -38,7 +38,7 @@ test('a mixed pool names each row provider', () => {
     oauth('someone@example.com', { provider: 'codex', accountId: 'acct-1' }),
   ]);
   const claude = rowOf(tui, 0), codex = rowOf(tui, 1);
-  assert.match(claude, /Anthropic/);
+  assert.match(claude, /Claude/);
   assert.match(codex, /Codex/);
   // The same address on both rows is exactly the case the column has to resolve.
   assert.match(claude, /someone@example\.com/);
@@ -51,7 +51,7 @@ test('the provider label is not truncated', () => {
     oauth('a@example.com'),
     oauth('b@example.com', { provider: 'codex', accountId: 'acct-2' }),
   ]);
-  assert.match(rowOf(tui, 0), /Anthropic\s/, 'the longer label keeps all of its characters');
+  assert.match(rowOf(tui, 0), /Claude\s/, 'the longer label keeps all of its characters');
 });
 
 // A pool that serves one provider learns nothing from a column repeating its name, so
@@ -60,7 +60,7 @@ test('a single-provider pool keeps showing the auth type', () => {
   const tui = tuiFor([oauth('a@example.com'), oauth('b@example.com')]);
   const row = rowOf(tui, 0);
   assert.match(row, /oauth/);
-  assert.doesNotMatch(row, /Anthropic/);
+  assert.doesNotMatch(row, /Claude/);
 });
 
 test('a codex-only pool also keeps the auth type', () => {

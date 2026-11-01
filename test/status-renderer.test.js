@@ -589,3 +589,12 @@ test('renderStatus strips control characters out of account and route strings', 
   assert.match(output, /pinned: a/);
   assert.equal(output.split('\n').filter(l => /forged/.test(l)).length, 1);   // no forged line
 });
+
+test('renderStatus names each account provider only in a mixed pool', () => {
+  const status = sampleStatus();
+  assert.match(renderStatus(status, { color: false, now }), /a \(oauth, prio 0\)/);
+  status.accounts.push({ ...status.accounts[0], name: 'b', provider: 'codex', priority: 1 });
+  const output = renderStatus(status, { color: false, now });
+  assert.match(output, /a \(Claude, oauth, prio 0\)/);
+  assert.match(output, /b \(Codex, oauth, prio 1\)/);
+});

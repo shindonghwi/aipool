@@ -154,6 +154,31 @@ aipool alias --install    # 또는 셸 rc 파일에 기록(제거는 --uninstall
 
 이것은 대화형 셸 별칭이므로 프롬프트에 입력한 `claude`에만 적용되고, 에디터나 스크립트가 실행하는 `claude`에는 적용되지 않습니다. 별칭은 `aipool run`을 그대로 호출하는 얇은 래퍼이며, 프록시 가동 여부 확인 로직은 그쪽에 있습니다(따라서 프록시가 내려가 있으면 오류가 납니다. 대신 claude를 직접 실행하려면 `--auto-fallback`을 추가합니다).
 
+## Claude와 Codex 세션 사이의 메시지
+
+`aipool peer`는 같은 컴퓨터에서 열려 있는 Claude Code 세션과 Codex 세션이 서로 메시지를 주고받게 합니다. 터미널에 글자를 입력하는 방식이 아니라, 받는 쪽 세션의 다음 입력으로 바로 들어갑니다. 프록시 서버가 꺼져 있어도 동작합니다.
+
+```bash
+aipool peer install                         # 한 번만: Claude 세션을 깨우는 훅과 에이전트용 안내 설치
+aipool peer list                            # 열려 있는 Claude 세션과 Codex 세션
+aipool peer send <세션> "메시지"             # 보내기 (- 를 주면 stdin에서 읽음)
+aipool peer send --wait <Codex 세션> "질문"  # Codex의 답이 올 때까지 기다렸다가 출력
+aipool peer read                            # 이 Claude 세션에 온 메시지 읽기 (wait는 올 때까지 대기)
+aipool peer name <스레드 id> <이름>          # Codex 세션에 이름 붙이기
+aipool peer uninstall                       # 훅과 안내 제거
+```
+
+받는 쪽에 따라 전달 방식이 다릅니다.
+
+- **Codex 세션으로:** `codex queue`로 넣습니다. 열려 있는 Codex 창에 일반 대화처럼 보이고, 진행 중인 턴이 있으면 끝난 뒤에 처리됩니다. Codex 공유 데몬이 켜져 있어야 합니다(`codex app-server daemon start`). 아직 한 번도 입력하지 않은 새 Codex 창도 스레드 id로 보낼 수 있습니다.
+- **Claude 세션으로:** Claude Code에는 밖에서 메시지를 넣는 입구가 없어서, 그 세션의 우편함(`~/.config/aipool-peer/inbox/`)에 넣습니다. `aipool peer install`이 `~/.claude/settings.json`에 넣는 asyncRewake 훅(SessionStart, Stop)이 우편함을 1초마다 확인하다가, 메시지가 오면 쉬고 있던 세션도 깨워 그 메시지를 전달합니다. 훅은 Claude 세션이 시작될 때와 턴이 끝날 때마다 다시 걸리며, 세션마다 하나만 돕니다. 훅이 없으면 받는 쪽이 `aipool peer read`로 읽어야 합니다.
+
+세션은 `aipool peer list`에 나오는 이름이나 id로 지정합니다. Claude 세션은 이름(`aipool-95` 같은), 세션 id, pid로, Codex 세션은 스레드 id나 이름으로 지정할 수 있습니다. 보내는 쪽이 누구인지는 자동으로 알아냅니다. Codex는 실행하는 명령에 `CODEX_THREAD_ID`를 넘겨 주고, Claude 세션은 셸의 상위 프로세스로 찾습니다. 어느 쪽도 아니면 `--from <이름>`이나 `AIPOOL_PEER_NAME`으로 지정합니다.
+
+받는 쪽에는 `[peer from 보낸 세션]`으로 시작하는 메시지와 답장 명령이 함께 전달됩니다. 답장 명령은 보낸 세션의 id를 쓰므로, 세션 이름이 바뀌거나 이름에 공백이 있어도 그대로 동작합니다. `install`은 `~/.claude/CLAUDE.md`와 `~/.codex/AGENTS.md`에도 사용법 안내를 넣어서, 두 도구의 에이전트가 이 명령을 알고 쓰도록 합니다. 안내는 표시된 블록 안에만 쓰고, `uninstall`이 그 블록만 지웁니다.
+
+훅은 `install`을 실행한 뒤 새로 연 Claude 세션부터 적용됩니다. 이미 열려 있던 세션에 적용하려면 세션을 다시 여세요.
+
 ## 명령어 레퍼런스
 
 ```bash
@@ -185,6 +210,7 @@ aipool warmup reset 15:30 --timezone Europe/Moscow
                              # 매일 목표 리셋 시각에 맞춰 워밍업 예약
 aipool warmup rolling 15:30 --timezone Europe/Moscow
                              # 리셋 기준을 15:30에 맞추고 이후 5시간마다 이어감
+aipool peer send <세션> "..."  # Claude·Codex 세션 사이 메시지(list/read/wait/install)
 aipool api <path>        # 계정 자격 증명으로 API 엔드포인트 호출
 aipool update            # 현재 버전 표시 (git 체크아웃은 git pull로 갱신)
 aipool version           # 설치된 버전 출력

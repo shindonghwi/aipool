@@ -146,11 +146,12 @@ aipool restart   # 서비스로 돌리는 경우. aipool server로 켰다면 껐
 
 ```bash
 aipool alias --uninstall
+aipool peer uninstall      # aipool peer install을 했다면
 aipool service uninstall
 rm -rf ~/aipool
 ```
 
-셸 rc 파일의 `alias aipool=...` 줄과 `~/.codex/config.toml`에 넣은 aipool 설정도 지우세요. 계정 토큰이 담긴 설정 파일은 `~/.config/aipool.json`, `aipool.state.json`, `aipool-ca.pem`, `aipool-leaf.pem`, `aipool-leaf.key`로 `~/.config`에 남아 있으니 필요 없으면 함께 지우세요.
+셸 rc 파일의 `alias aipool=...` 줄과 `~/.codex/config.toml`에 넣은 aipool 설정도 지우세요. 계정 토큰이 담긴 설정 파일은 `~/.config/aipool.json`, `aipool.state.json`, `aipool-ca.pem`, `aipool-leaf.pem`, `aipool-leaf.key`로 `~/.config`에 남아 있으니 필요 없으면 함께 지우세요. `aipool peer`의 우편함은 `~/.config/aipool-peer`에 있습니다.
 
 ## 더 보기
 
