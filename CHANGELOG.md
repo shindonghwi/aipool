@@ -2,6 +2,13 @@
 
 버전은 [유의적 버전](https://semver.org/lang/ko/)을 따릅니다. 기능을 더하면 가운데 숫자를, 고치기만 하면 끝 숫자를 올립니다. 릴리스마다 `vX.Y.Z` 태그를 붙입니다.
 
+## 1.1.0 — 2026-11-03
+
+- `aipool peer`가 백그라운드 세션(`claude --bg`)과도 메시지를 주고받음. `peer list`에 `(background)`로 표시.
+- `/resume`이나 `/clear` 뒤에 남는 대기 프로세스를 서버가 5분마다 정리. `aipool peer sweep`으로 바로 정리할 수도 있음.
+- 대기 프로세스가 없는 세션에 보내면 "바로 깨운다" 대신 언제 받는지 안내.
+- 문서: Codex 이미지 생성(`$imagegen`)에 필요한 `requires_openai_auth = true`와 `codex login` 안내.
+
 ## 1.0.0 — 2026-11-01
 
 첫 공개 버전입니다.

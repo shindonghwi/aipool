@@ -26,7 +26,7 @@ import { syncAccountsFromDisk } from './sync-accounts.js';
 import { mergeAccountsForSave, syncRefreshedTokens, removedAccountIds, clearRemovedAccountIds } from './account-pairing.js';
 import { ensureAccountIds } from './account-id.js';
 import * as alias from './alias.js';
-import { peerCommand } from './peer.js';
+import { peerCommand, startWaiterSweeps } from './peer.js';
 import { ensureCerts, mitmHosts } from './mitm.js';
 import { Prober } from './prober.js';
 import { Warmer } from './warmer.js';
@@ -711,6 +711,9 @@ async function serverCommand() {
   quotaSaveInterval = setInterval(persistQuotaState, 60_000);
   quotaSaveInterval.unref?.();
 
+  // Waiters of `aipool peer` that a /resume or /clear left behind.
+  const stopWaiterSweeps = startWaiterSweeps(message => console.error(`[AIPool] ${message}`));
+
   // Start the opt-in quota probe (no-op when quotaProbeSeconds is 0).
   prober = new Prober(accountManager, {
     intervalMs: (config.quotaProbeSeconds || 0) * 1000,
@@ -757,6 +760,7 @@ async function serverCommand() {
     warmer?.stop();
     eventLoopMonitor.stop();
     if (quotaSaveInterval) clearInterval(quotaSaveInterval);
+    stopWaiterSweeps();
     await persistQuotaState();
     // Don't linger waiting on keep-alive / streaming connections: actively
     // destroy them so server.close() can complete promptly, and hard-exit after a
@@ -2256,7 +2260,8 @@ Commands:
                       Anchor a continuous five-hour reset cadence in an IANA zone
   peer <sub>          Message between the Claude Code and Codex sessions on this
                       machine: list | send <session> <text> [--wait] | read |
-                      wait | whoami | name <thread> <name> | install | uninstall
+                      wait | whoami | name <thread> <name> | install | uninstall |
+                      sweep
                       ('install' adds the hook that wakes Claude sessions)
   api <path>          Call an API endpoint with account credentials
   update              Check npm for a newer aipool and install it

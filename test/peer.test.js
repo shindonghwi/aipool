@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import net from 'node:net';
@@ -8,14 +8,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   agentNote,
+  claudeSessions,
   cliRef,
   codexMessage,
   codexThreads,
+  hasWaiter,
   postToMailbox,
   resolveTarget,
   rewake,
   rewakeCommand,
   shellWord,
+  sweepWaiters,
   takeFromMailbox,
   waitForCodexReply,
   whoami,
@@ -169,10 +172,119 @@ test('the wake hook hands over what arrives and exits 2; a session it cannot fin
     assert.ok(said.includes(`peer send ${TID} "..."`), said);
     assert.match(said, /\[peer from web codex · .*\]\ndone, see out\.png/);
     assert.ok(!existsSync(join(s.dir, 'aipool-peer', 'waiter', `${SID}.lock`)), 'the lock is released');
-    // A background or -p session is never listed as interactive.
+    // A session that is not listed, such as a -p run, has nothing to wake.
     assert.equal(await rewake(JSON.stringify({ session_id: SID }), { sessions: () => [], pollMs: 10, findTries: 2, findGapMs: 1 }), 0);
     assert.equal(await rewake('not json'), 0);
   } finally { s.done(); }
+});
+
+test('interactive and background sessions can be messaged, a -p run cannot', async () => {
+  const s = scratch();
+  const prevPath = process.env.PATH;
+  try {
+    const { chmodSync } = await import('node:fs');
+    const bin = join(s.dir, 'bin');
+    mkdirSync(bin);
+    const list = [['interactive', 'a', SID], ['background', 'b c', TID], ['print', 'd', SID], ['interactive', '', SID], ['background', 'e', 'not-a-uuid']]
+      .map(([kind, name, sessionId]) => ({ kind, name, sessionId, pid: 1 }));
+    writeFileSync(join(bin, 'claude'), `#!/bin/sh\necho '${JSON.stringify(list)}'\n`);
+    chmodSync(join(bin, 'claude'), 0o755);
+    process.env.PATH = `${bin}:${prevPath}`;
+    assert.deepEqual(claudeSessions().map(x => x.name), ['a', 'b c']);
+  } finally { process.env.PATH = prevPath; s.done(); }
+});
+
+test('hasWaiter goes by a live holder of the lock', () => {
+  const s = scratch();
+  try {
+    assert.equal(hasWaiter(SID), false);
+    const dir = join(s.dir, 'aipool-peer', 'waiter');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${SID}.lock`), String(process.pid));
+    assert.equal(hasWaiter(SID), true);
+    writeFileSync(join(dir, `${SID}.lock`), '999999');
+    assert.equal(hasWaiter(SID), false);
+  } finally { s.done(); }
+});
+
+test('a sweep ends only the waiters nothing can reach', async () => {
+  const s = scratch();
+  try {
+    const hookPath = '/x/peer-hook.js';
+    const waiterDir = join(s.dir, 'aipool-peer', 'waiter');
+    mkdirSync(waiterDir, { recursive: true });
+    const ids = ['a', 'b', 'c', 'd', 'e', 'f'].map(c => `${c.repeat(8)}-1111-4111-8111-111111111111`);
+    const [replaced, current, gone] = ids;
+    ids.forEach((id, i) => writeFileSync(join(waiterDir, `${id}.lock`), String(100 + i)));
+    writeFileSync(join(waiterDir, 'not-a-lock.txt'), '100');
+    const hook = `node ${hookPath}`;
+    const processes = async () => [
+      { pid: 50, ppid: 1, command: 'claude' },
+      { pid: 51, ppid: 1, command: 'claude' },
+      { pid: 100, ppid: 50, command: hook },    // 50 has moved on to `current`
+      { pid: 101, ppid: 50, command: hook },
+      { pid: 102, ppid: 1, command: hook },     // nothing above it any more
+      { pid: 103, ppid: 51, command: hook },    // 51 does not say which session it runs
+      { pid: 104, ppid: 50, command: 'vim' },   // the pid went to something else
+    ];
+    const killed = [];
+    const run = (opts) => sweepWaiters({ processes, hookPath, sessionOf: pid => (pid === 50 ? current : null), kill: pid => killed.push(pid), ...opts });
+
+    // Inside the grace period only the waiter with no session above it goes.
+    assert.deepEqual((await run({ now: Date.now() })).map(w => w.pid), [102]);
+    killed.length = 0;
+    const ended = await run({ now: Date.now() + 120_000 });
+    assert.deepEqual(killed, [100, 102]);
+    assert.deepEqual(ended.map(w => w.sessionId), [replaced, gone]);
+    assert.match(ended[0].reason, new RegExp(current));
+
+    // Nothing to look after, no process listing.
+    rmSync(waiterDir, { recursive: true });
+    assert.deepEqual(await sweepWaiters({ processes: async () => { throw new Error('listed'); } }), []);
+  } finally { s.done(); }
+});
+
+// The real hook and the real process table: the sweep ends the waiter whose
+// session moved on, its lock goes with it, and the current one keeps watching.
+test('a sweep ends a real stale waiter and leaves the current one', async () => {
+  const s = scratch();
+  const prevDir = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = join(s.dir, 'claude');
+  const children = [];
+  try {
+    const { chmodSync } = await import('node:fs');
+    const bin = join(s.dir, 'bin');
+    mkdirSync(bin);
+    mkdirSync(join(s.dir, 'claude', 'sessions'), { recursive: true });
+    const entry = id => `{"kind":"interactive","name":"n","sessionId":"${id}","pid":${process.pid}}`;
+    writeFileSync(join(bin, 'claude'), `#!/bin/sh\necho '[${entry(SID)},${entry(TID)}]'\n`);
+    chmodSync(join(bin, 'claude'), 0o755);
+    writeFileSync(join(s.dir, 'claude', 'sessions', `${process.pid}.json`), JSON.stringify({ sessionId: TID }));
+    const hook = new URL('../src/peer-hook.js', import.meta.url).pathname;
+    const start = (id) => {
+      const child = spawn(process.execPath, [hook], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdio: ['pipe', 'ignore', 'ignore'] });
+      child.stdin.end(JSON.stringify({ session_id: id, hook_event_name: 'SessionStart' }));
+      children.push(child);
+      return child;
+    };
+    const lock = id => join(s.dir, 'aipool-peer', 'waiter', `${id}.lock`);
+    const stale = start(SID);
+    const kept = start(TID);
+    for (let i = 0; i < 200 && !(existsSync(lock(SID)) && existsSync(lock(TID))); i++) await new Promise(r => setTimeout(r, 25));
+
+    const closed = new Promise(r => stale.on('close', r));
+    const ended = await sweepWaiters({ now: Date.now() + 120_000 });
+    assert.deepEqual(ended.map(w => [w.pid, w.sessionId]), [[stale.pid, SID]]);
+    assert.equal(await closed, 0, 'it ends quietly, without waking the session');
+    assert.ok(!existsSync(lock(SID)), 'its lock goes with it');
+    assert.ok(existsSync(lock(TID)));
+    assert.equal(kept.exitCode, null);
+  } finally {
+    for (const c of children) c.kill();
+    if (prevDir === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevDir;
+    await new Promise(r => setTimeout(r, 100));
+    s.done();
+  }
 });
 
 // A stand-in for the Codex daemon's control socket: the WebSocket handshake,

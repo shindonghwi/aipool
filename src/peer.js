@@ -16,12 +16,13 @@
 // that has not had a turn yet is loaded too, so it can be reached by thread id
 // before anyone types into it.
 
-import { spawnSync } from 'node:child_process';
-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile, spawnSync } from 'node:child_process';
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
 import { aipoolRef, writeFileAtomic } from './alias.js';
 
@@ -46,6 +47,7 @@ const USAGE = [
   '       aipool peer whoami                       the session running this shell',
   '       aipool peer name <thread> <name>         name a Codex session',
   '       aipool peer install | uninstall          the wake hook and the agents\' notes',
+  '       aipool peer sweep                        end waiters whose session has moved on',
   '',
   'A Codex session gets the message as its next turn. A Claude session gets it',
   'in its mailbox, and the hook from `aipool peer install` wakes it.',
@@ -115,15 +117,15 @@ export function rewakeCommand(hookPath = besideThis('./peer-hook.js')) {
  */
 
 /**
- * Interactive Claude Code sessions. Background and `-p` sessions are left out:
- * no hook watches a mailbox for them.
+ * Claude Code sessions that can be messaged: interactive and background ones,
+ * whose hooks watch a mailbox. A `-p` run ends on its own and is left out.
  * @returns {ClaudeSession[]}
  */
 export function claudeSessions() {
   const r = spawnSync('claude', ['agents', '--json'], { encoding: 'utf8', timeout: 20_000 });
   let list;
   try { list = JSON.parse(r.stdout || '[]'); } catch { return []; }
-  return Array.isArray(list) ? list.filter(s => s?.kind === 'interactive' && s.name && UUID_RE.test(s.sessionId || '')) : [];
+  return Array.isArray(list) ? list.filter(s => ['interactive', 'background'].includes(s?.kind) && s.name && UUID_RE.test(s.sessionId || '')) : [];
 }
 
 // ── Codex daemon ────────────────────────────────────────────
@@ -530,6 +532,11 @@ function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (err) { return err.code === 'EPERM'; }
 }
 
+/** Whether a waiter is watching this session's mailbox right now. */
+export function hasWaiter(sessionId) {
+  try { return alive(Number(readFileSync(join(peerDir(), 'waiter', `${sessionId}.lock`), 'utf8')) || 0); } catch { return false; }
+}
+
 /**
  * One waiter per session: the hook runs again at the end of every turn, and a
  * waiter already watching the mailbox is left to it. A lock left by a waiter
@@ -601,6 +608,90 @@ export async function rewake(input, { sessions = claudeSessions, write = s => pr
 export async function rewakeMain() {
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.once(sig, () => process.exit(0));
   return rewake(await readStdin());
+}
+
+// ── orphaned waiters ────────────────────────────────────────
+
+// A session changes id on /resume and /clear. The hook then starts a waiter for
+// the new id, and the old one goes on watching a mailbox nobody writes to until
+// the Claude process exits. A waiter can also outlive its session if the pid it
+// watches gets reused.
+
+const SWEEP_EVERY_MS = 5 * 60_000;
+// A resuming session starts on a fresh id and moves to the old one a moment
+// later, so what its file says right then may not be final yet.
+const SWEEP_GRACE_MS = 60_000;
+
+/** The session a Claude process says it is running, or null when it does not say. */
+function sessionOfProcess(pid) {
+  try {
+    const id = JSON.parse(readFileSync(join(claudeDir(), 'sessions', `${pid}.json`), 'utf8'))?.sessionId;
+    return UUID_RE.test(id || '') ? id : null;
+  } catch { return null; }
+}
+
+async function listProcesses() {
+  const { stdout } = await promisify(execFile)('ps', ['-axwwo', 'pid=,ppid=,command='], { maxBuffer: 64 * 1024 * 1024 });
+  return stdout.split('\n').flatMap((line) => {
+    const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), command: m[3] }] : [];
+  });
+}
+
+/**
+ * Ends the waiters nothing can reach any more, and only those: a lock's holder
+ * has to be running our hook, and its Claude process has to be gone or to name
+ * another session. When that can't be told, the waiter stays.
+ * @returns {Promise<{ pid: number, sessionId: string, reason: string }[]>} what was ended
+ */
+export async function sweepWaiters({
+  processes = listProcesses,
+  sessionOf = sessionOfProcess,
+  kill = (/** @type {number} */ pid) => process.kill(pid, 'SIGTERM'),
+  now = Date.now(),
+  graceMs = SWEEP_GRACE_MS,
+  hookPath = besideThis('./peer-hook.js'),
+} = {}) {
+  const dir = join(peerDir(), 'waiter');
+  let locks;
+  try { locks = readdirSync(dir).filter(f => f.endsWith('.lock')); } catch { return []; }
+  if (!locks.length) return [];
+  const byPid = new Map((await processes()).map(p => [p.pid, p]));
+  const ended = [];
+  for (const file of locks) {
+    const sessionId = file.slice(0, -'.lock'.length);
+    const path = join(dir, file);
+    let holder = 0, age = 0;
+    try { holder = Number(readFileSync(path, 'utf8')) || 0; age = now - statSync(path).mtimeMs; } catch { continue; }
+    const waiter = byPid.get(holder);
+    if (!waiter?.command.endsWith(` ${hookPath}`)) continue;
+    let reason = '';
+    if (waiter.ppid === 1 || !byPid.has(waiter.ppid)) {
+      reason = 'its session is gone';
+    } else if (age >= graceMs) {
+      const current = sessionOf(waiter.ppid);
+      if (current && current !== sessionId) reason = `its session is now ${current}`;
+    }
+    if (!reason) continue;
+    try { kill(holder); ended.push({ pid: holder, sessionId, reason }); } catch { /* already gone */ }
+  }
+  return ended;
+}
+
+/**
+ * Sweeps for as long as the server runs. Without a waiter this costs a directory
+ * read; `claude` itself is not needed, which the service's PATH may not reach.
+ * @param {(message: string) => void} log
+ * @returns {() => void} stops it
+ */
+export function startWaiterSweeps(log) {
+  const timer = setInterval(() => {
+    sweepWaiters()
+      .then((ended) => { if (ended.length) log(`Ended ${ended.length} orphaned peer waiter${ended.length === 1 ? '' : 's'}`); })
+      .catch(() => { /* the next sweep tries again */ });
+  }, SWEEP_EVERY_MS);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 // ── install ─────────────────────────────────────────────────
@@ -766,11 +857,17 @@ export async function peerCommand(argv) {
         const [sessions, threads] = [claudeSessions(), await codexThreads()];
         console.log('Claude sessions');
         if (!sessions.length) console.log('  (none)');
-        for (const s of sessions) console.log(`  ${s.name.padEnd(36)} ${String(s.status || '').padEnd(5)}  ${s.cwd || ''}`);
+        for (const s of sessions) console.log(`  ${s.name.padEnd(36)} ${String(s.status || '').padEnd(5)}  ${s.cwd || ''}${s.kind === 'background' ? '  (background)' : ''}`);
         console.log('Codex sessions');
         if (threads === null) console.log('  (the Codex daemon is not running: codex app-server daemon start)');
         else if (!threads.length) console.log('  (none open)');
         for (const t of threads || []) console.log(`  ${t.id}  ${(t.name || '-').padEnd(20)} ${String(t.status).padEnd(6)} ${t.cwd}`);
+        return 0;
+      }
+      case 'sweep': {
+        const ended = await sweepWaiters();
+        if (!ended.length) console.log('No orphaned waiters.');
+        for (const w of ended) console.log(`Ended waiter ${w.pid} for ${w.sessionId}: ${w.reason}`);
         return 0;
       }
       case 'whoami': {
@@ -799,7 +896,10 @@ export async function peerCommand(argv) {
           if (opts.wait) console.error('aipool peer: --wait is for Codex sessions; a Claude session answers with its own peer send');
           postToMailbox(to.id, { from, replyTo, text });
           console.log(hookInstalled()
-            ? `Delivered to Claude session ${to.name}; its hook wakes it within a second.`
+            ? (hasWaiter(to.id)
+              ? `Delivered to Claude session ${to.name}; its hook wakes it within a second.`
+              // The hook runs again when a turn ends, and that waiter finds the message.
+              : `Left in the mailbox of Claude session ${to.name}. Nothing is watching it right now, so it sees the message when its current or next turn ends.`)
             : `Left in the mailbox of Claude session ${to.name}. No wake hook is installed (aipool peer install), so it is seen on: aipool peer read ${to.name}`);
           return 0;
         }

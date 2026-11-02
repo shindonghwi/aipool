@@ -166,12 +166,15 @@ aipool peer send --wait <Codex 세션> "질문"  # Codex의 답이 올 때까지
 aipool peer read                            # 이 Claude 세션에 온 메시지 읽기 (wait는 올 때까지 대기)
 aipool peer name <스레드 id> <이름>          # Codex 세션에 이름 붙이기
 aipool peer uninstall                       # 훅과 안내 제거
+aipool peer sweep                           # 할 일이 없어진 대기 프로세스 바로 정리 (서버가 5분마다 자동으로 함)
 ```
 
 받는 쪽에 따라 전달 방식이 다릅니다.
 
 - **Codex 세션으로:** `codex queue`로 넣습니다. 열려 있는 Codex 창에 일반 대화처럼 보이고, 진행 중인 턴이 있으면 끝난 뒤에 처리됩니다. Codex 공유 데몬이 켜져 있어야 합니다(`codex app-server daemon start`). 아직 한 번도 입력하지 않은 새 Codex 창도 스레드 id로 보낼 수 있습니다.
 - **Claude 세션으로:** Claude Code에는 밖에서 메시지를 넣는 입구가 없어서, 그 세션의 우편함(`~/.config/aipool-peer/inbox/`)에 넣습니다. `aipool peer install`이 `~/.claude/settings.json`에 넣는 asyncRewake 훅(SessionStart, Stop)이 우편함을 1초마다 확인하다가, 메시지가 오면 쉬고 있던 세션도 깨워 그 메시지를 전달합니다. 훅은 Claude 세션이 시작될 때와 턴이 끝날 때마다 다시 걸리며, 세션마다 하나만 돕니다. 훅이 없으면 받는 쪽이 `aipool peer read`로 읽어야 합니다.
+
+백그라운드 세션(`claude --bg`)도 같은 방식으로 받습니다. 훅을 설치하기 전에 시작했거나 대기 프로세스가 없는 세션은 현재 또는 다음 턴이 끝날 때 메시지를 받습니다.
 
 세션은 `aipool peer list`에 나오는 이름이나 id로 지정합니다. Claude 세션은 이름(`aipool-95` 같은), 세션 id, pid로, Codex 세션은 스레드 id나 이름으로 지정할 수 있습니다. 보내는 쪽이 누구인지는 자동으로 알아냅니다. Codex는 실행하는 명령에 `CODEX_THREAD_ID`를 넘겨 주고, Claude 세션은 셸의 상위 프로세스로 찾습니다. 어느 쪽도 아니면 `--from <이름>`이나 `AIPOOL_PEER_NAME`으로 지정합니다.
 
