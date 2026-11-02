@@ -120,6 +120,7 @@ model_provider = "aipool"
 name = "aipool"
 base_url = "http://127.0.0.1:3456/backend-api/codex"
 wire_api = "responses"
+requires_openai_auth = true   # 이미지 생성에 필요. `codex login`도 해 두세요
 ```
 
 ### MITM 프록시를 통한 방식 (Codex 설정 불필요)

@@ -95,9 +95,12 @@ sandbox_mode = "danger-full-access"
 name = "aipool"
 base_url = "http://127.0.0.1:3456/backend-api/codex"
 wire_api = "responses"
+requires_openai_auth = true
 ```
 
 위의 세 줄(`model_provider`, `approval_policy`, `sandbox_mode`)은 파일 맨 위, 첫 번째 `[...]` 섹션보다 앞에 두세요. TOML에서는 섹션 아래에 적은 키가 그 섹션에 속하게 되어 설정이 적용되지 않습니다.
+
+`requires_openai_auth = true`는 이미지 생성(`$imagegen`)에 필요합니다. 이 줄이 없거나 Codex 자체 로그인이 안 되어 있으면 Codex가 이미지 도구를 빼고 요청을 보냅니다. 그러니 `codex login`도 한 번 해 두세요. Codex가 보내는 인증 정보는 AIPool이 풀 계정의 것으로 바꿔서 보내므로, 요청은 그대로 풀 계정으로 처리됩니다.
 
 그다음은 그냥 실행하면 됩니다.
 
