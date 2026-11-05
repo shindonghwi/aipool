@@ -178,6 +178,38 @@ test('a provider with nothing left says when its first account is back', () => {
   assert.match(render(s), /^Codex · none available — next back in 5h$/m);
 });
 
+test('Claude family readings never add Sonnet or Fable bars to Codex cards', () => {
+  const s = status();
+  s.accounts[2].quota.unified7dSonnet = 0.2;
+  s.accounts.push(
+    { name: 'wk@example.com', provider: 'codex', quota: { unified7d: 0.18 } },
+    { name: 'both@example.com', provider: 'codex', quota: { unified5h: 0.3, unified7d: 0.1 } },
+  );
+  const out = render(s);
+  assert.match(cardOf(out, 'b'), /Sonnet/);
+  assert.match(cardOf(out, 'b'), /Fable/);
+  for (const name of ['wk', 'both']) {
+    assert.match(cardOf(out, name), /Weekly/);
+    assert.doesNotMatch(cardOf(out, name), /Sonnet|Fable|no reading yet/);
+  }
+});
+
+test('Codex readings never add empty windows to Claude cards', () => {
+  const s = status({ accounts: [
+    { name: 'claude@example.com', quota: { unified7d: 0.2 } },
+    { name: 'codex@example.com', provider: 'codex', quota: { unified5h: 0.3, unified7d: 0.1 } },
+  ] });
+  const out = render(s);
+  assert.match(cardOf(out, 'codex'), /5h/);
+  assert.doesNotMatch(cardOf(out, 'claude'), /5h|no reading yet/);
+});
+
+test('a Codex-only pool ignores stale Claude family fields', () => {
+  const s = status();
+  s.accounts = s.accounts.map(a => ({ ...a, provider: 'codex' }));
+  assert.doesNotMatch(render(s), /Sonnet|Fable/);
+});
+
 test('a single-provider pool has no provider heading', () => {
   const out = render(status());
   assert.doesNotMatch(out, /^(Claude|Codex)\b/m);

@@ -113,12 +113,12 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
 const nameText = value => safeLine(value, 64);
 
 // The quota windows the default status shows, in column order. A column is
-// drawn only when some account reports that bucket.
+// drawn only when an account at the same provider reports that bucket.
 const COMPACT_COLUMNS = [
   { key: 'unified5h', label: '5h' },
   { key: 'unified7d', label: 'Weekly' },
-  { key: 'unified7dSonnet', label: 'Sonnet' },
-  { key: 'unified7dFable', label: 'Fable' },
+  { key: 'unified7dSonnet', label: 'Sonnet', provider: 'anthropic' },
+  { key: 'unified7dFable', label: 'Fable', provider: 'anthropic' },
 ];
 
 // Wider than renderStatus's bars: here they are the main thing on the screen.
@@ -158,7 +158,6 @@ export function renderStatusCompact(status, { color = process.stdout.isTTY, now 
   const sep = paint.dim(' · ');
   const all = Array.isArray(status.accounts) ? status.accounts : [];
   const blocked = (status.blockedModels || []).filter((/** @type {any} */ p) => typeof p === 'string' && p.length).map((/** @type {string} */ p) => safeLine(p, 64));
-  const columns = COMPACT_COLUMNS.filter(c => all.some(a => a.quota?.[c.key] != null));
 
   // Most useful first: in use (busiest first), ready, out (soonest back first),
   // broken, disabled. Ties keep preference order, as renderStatus lists them.
@@ -212,7 +211,7 @@ export function renderStatusCompact(status, { color = process.stdout.isTTY, now 
 
   // ── The accounts: a card each — name and state, then a bar per window ──
   const nameWidth = Math.max(7, ...names.map(n => n.length));
-  const pushCard = (/** @type {typeof rows[number]} */ row) => {
+  const pushCard = (/** @type {typeof rows[number]} */ row, /** @type {typeof COMPACT_COLUMNS} */ columns) => {
     const { account } = row;
     const off = row.rank >= 4;
     const tint = row.tint(paint);
@@ -259,7 +258,9 @@ export function renderStatusCompact(status, { color = process.stdout.isTTY, now 
       pushFleetWeekly(group.rows);
       lines.push('');
     }
-    group.rows.forEach(pushCard);
+    const columns = COMPACT_COLUMNS.filter(c => (!c.provider || c.provider === group.id)
+      && group.rows.some(r => r.account.quota?.[c.key] != null));
+    group.rows.forEach(row => pushCard(row, columns));
   }
 
   // ── Needs attention: only what a person should act on or know ──

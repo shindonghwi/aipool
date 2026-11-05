@@ -2,6 +2,11 @@
 
 버전은 [유의적 버전](https://semver.org/lang/ko/)을 따릅니다. 기능을 더하면 가운데 숫자를, 고치기만 하면 끝 숫자를 올립니다. 릴리스마다 `vX.Y.Z` 태그를 붙입니다.
 
+## 1.1.1 — 2026-11-06
+
+- `aipool status`의 쿼터 항목을 제공자별로 구분. Codex 계정에 Claude의 Fable·Sonnet 항목이 표시되던 문제 수정.
+- `peer list`에서 사용하는 Claude 세션의 `kind` 필드를 타입 선언에 추가해 타입 검사 오류 수정.
+
 ## 1.1.0 — 2026-11-03
 
 - `aipool peer`가 백그라운드 세션(`claude --bg`)과도 메시지를 주고받음. `peer list`에 `(background)`로 표시.

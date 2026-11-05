@@ -112,7 +112,7 @@ export function rewakeCommand(hookPath = besideThis('./peer-hook.js')) {
 // ── Claude sessions ─────────────────────────────────────────
 
 /**
- * @typedef {{ name: string, sessionId: string, pid: number, cwd?: string, status?: string }} ClaudeSession
+ * @typedef {{ name: string, sessionId: string, pid: number, cwd?: string, status?: string, kind?: 'interactive' | 'background' }} ClaudeSession
  * @typedef {{ id: string, name: string, cwd: string, status: string, path: string }} CodexThread
  */
 
