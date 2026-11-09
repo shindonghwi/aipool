@@ -2,6 +2,15 @@
 
 버전은 [유의적 버전](https://semver.org/lang/ko/)을 따릅니다. 기능을 더하면 가운데 숫자를, 고치기만 하면 끝 숫자를 올립니다. 릴리스마다 `vX.Y.Z` 태그를 붙입니다.
 
+## 1.2.0 — 2026-11-09
+
+- Codex 계정이 모두 전환 임계값(기본 98%)을 넘으면, 플랜이 남은 계정이 100%까지 계속 처리. 전에는 1분에 요청 하나만 보내고 나머지는 429로 돌려보냈음.
+- Codex 구매 크레딧 지원. 플랜을 100% 다 썼고 크레딧이 남아 있으면 `aipool status`와 Codex가 받는 429 메시지에서 계속 쓸지 묻고, `aipool credits on|off`로 답을 저장. 답은 주간 한도가 초기화될 때까지만 유효하고, 다음에 플랜을 다 쓰면 다시 물음. 답을 받기 전에는 크레딧으로 청구될 요청을 하나도 보내지 않음.
+- `aipool status`의 Codex 카드에 `Credits` 줄(잔액과 설정)을 항상 표시.
+- Codex가 예정보다 일찍 한도를 초기화해도 감지. 붙잡아 둔 Codex 계정은 2분마다 무료 사용량 조회로 확인하고, 풀리면 429 대기를 풀고 바로 플랜으로 처리.
+- 무료 리셋 크레딧은 보유 사실만 알리고 사용하지 않음. 문구를 `N free limit resets held, not used by aipool`로 바꿈.
+- `aipool status`, `status -v`, TUI에 Antigravity 사용량 표시. Antigravity CLI의 상태 줄이 남긴 캐시(`~/.cache/aipool/agy-status.json`)를 읽음. TUI는 설정의 `agyStatus`를 켜야 표시.
+
 ## 1.1.1 — 2026-11-06
 
 - `aipool status`의 쿼터 항목을 제공자별로 구분. Codex 계정에 Claude의 Fable·Sonnet 항목이 표시되던 문제 수정.

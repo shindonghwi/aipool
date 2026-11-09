@@ -17,6 +17,7 @@ import { applyAuthHeaders, upstreamFor, rewritesBody, defaultHeadersTimeoutFor, 
 import { tunnelTls } from './sx.js';
 import { createEgressGuard } from './egress-guard.js';
 import { safeLine } from './safe-text.js';
+import { creditsQuestionText } from './codex-credits.js';
 import { forwardRefusal, guardedLookup, FORBIDDEN_FORWARD } from './forward-target.js';
 import { renderDashboardHtml, dashboardCsp } from './dashboard.js';
 import { createUsageRecorder, resolveUsageDimensions, usageDimensionHeaderNames } from './client-usage.js';
@@ -2483,7 +2484,11 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       type: 'error',
       error: {
         type: 'rate_limit_error',
-        message: exhaustedMessage(candidates, ctx.model, retryAfter),
+        // An account stopped only by its plan limit, holding credits nobody
+        // has said it may spend, asks here: the person reading this refusal
+        // is the one who can answer it.
+        message: exhaustedMessage(candidates, ctx.model, retryAfter)
+          + creditsQuestionText(candidates.filter(a => accountManager.creditsQuestionPending?.(a))),
       },
     }));
     return;

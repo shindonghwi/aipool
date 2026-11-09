@@ -5,6 +5,7 @@
 // are sent only to the provider that issued them.
 
 import { proxyFetch } from './upstream-fetch.js';
+import { creditBalance } from './codex-quota.js';
 
 export const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 
@@ -93,6 +94,31 @@ function resetCredits(raw) {
   return { available, applicable: creditCount(raw.applicable_available_count) };
 }
 
+/**
+ * The purchased credits this account holds, or null when the payload says
+ * nothing about them.
+ *
+ * Not the reset credits above: these are bought, and ChatGPT spends them on
+ * traffic once the plan's usage limit is reached, so an account holding a
+ * balance can keep serving past 100% of its window. `overage_limit_reached`
+ * is the spend control the account owner sets on that overage; once it trips,
+ * the balance no longer buys anything.
+ *
+ * @param {any} raw  the payload's `credits` object
+ * @returns {{hasCredits?: boolean, unlimited?: boolean, overageLimitReached?: boolean, balance?: number}|null}
+ */
+function purchasedCredits(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  /** @type {{hasCredits?: boolean, unlimited?: boolean, overageLimitReached?: boolean, balance?: number}} */
+  const out = {};
+  if (typeof raw.has_credits === 'boolean') out.hasCredits = raw.has_credits;
+  if (typeof raw.unlimited === 'boolean') out.unlimited = raw.unlimited;
+  if (typeof raw.overage_limit_reached === 'boolean') out.overageLimitReached = raw.overage_limit_reached;
+  const balance = creditBalance(raw.balance);
+  if (balance != null) out.balance = balance;
+  return Object.keys(out).length ? out : null;
+}
+
 // The most credits any surface will report. The count is drawn as `RC<n>` on a
 // TUI row budgeted to the cell, so it has to stay two digits wide whatever the
 // payload says; nobody holds a hundred of something granted one at a time.
@@ -158,6 +184,11 @@ export function normalizeCodexUsagePayload(data) {
     modelBuckets,
     planType: data?.plan_type || null,
     resetCredits: resetCredits(data?.rate_limit_reset_credits),
+    credits: purchasedCredits(data?.credits),
+    // Upstream's own verdict on the plan right now. False after an early reset
+    // (an OpenAI-wide one, or a free reset credit redeemed by hand) even while
+    // a hold armed by the last 429 says otherwise. Null when not stated.
+    limitReached: typeof rateLimit?.limit_reached === 'boolean' ? rateLimit.limit_reached : null,
   };
 }
 

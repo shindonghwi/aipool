@@ -1,4 +1,5 @@
 import { createWriteStream } from 'node:fs';
+import { readAgyStatus } from './agy-status.js';
 import { gatingUtilization } from './model.js';
 import { importCredentials, fetchProfile } from './oauth.js';
 import {
@@ -1817,6 +1818,26 @@ export class TUI {
         const order = this._displayOrder();
         const layout = this._listLayout(order, W);
         for (const i of order) lines.push(this._renderRow(i, layout, current));
+      }
+    }
+
+    const agy = this.config.agyStatus ? readAgyStatus() : null;
+    if (agy) {
+      const stale = Date.now() - agy.observedAt > 10 * 60_000;
+      lines.push('');
+      lines.push(paneTitle('Antigravity', W));
+      const email = safeLine(String(agy.email), Math.max(8, W - 18));
+      lines.push(`  ${bold(email)} ${dim(stale ? '(used · last observed)' : '(used)')}`);
+      for (const [label, prefix] of [['Gemini', 'gemini'], ['Claude / GPT', '3p']]) {
+        const cells = [`  ${label.padEnd(12)}`];
+        for (const [caption, suffix, windowMs] of [['5h', '5h', FIVE_HOUR_MS], ['Week', 'weekly', SEVEN_DAY_MS]]) {
+          const bucket = agy.quota[`${prefix}-${suffix}`];
+          const remaining = bucket?.remaining_fraction;
+          if (typeof remaining !== 'number' || remaining < 0 || remaining > 1) continue;
+          const reset = bucket.reset_time ? Date.parse(bucket.reset_time) : null;
+          cells.push(` ${dim(caption)} ${bar(1 - remaining, W >= 80 ? 16 : 10, Number.isFinite(reset) ? reset : null, windowMs)}`);
+        }
+        if (cells.length > 1) lines.push(fitLine(cells.join(''), W));
       }
     }
 

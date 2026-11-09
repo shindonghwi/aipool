@@ -59,7 +59,7 @@ Claude Code는 요청마다 `x-claude-code-session-id`를 보내므로, 활동 �
 curl -X POST http://localhost:3456/aipool/reload
 ```
 
-보통은 직접 호출할 필요가 없습니다. `login`, `import`, `enable`, `disable`, `priority`, `route`, `threshold`, `distribute`, `probe`, `warmup`은 실행 중인 서버에 스스로 알립니다.
+보통은 직접 호출할 필요가 없습니다. `login`, `import`, `enable`, `disable`, `priority`, `route`, `threshold`, `credits`, `distribute`, `probe`, `warmup`은 실행 중인 서버에 스스로 알립니다.
 
 제어 평면의 **쓰기** 요청(`reload`, `switch`)은 브라우저의 `Origin` 헤더나 크로스 사이트 `Sec-Fetch-Site` 헤더가 있으면 거부됩니다. 루프백은 프록시 API 키 검사에서 면제되므로 CLI에는 별도 설정이 필요 없지만, 이 면제는 우연히 방문한 웹 페이지에도 똑같이 적용됩니다. 웹 페이지는 프리플라이트 없이 `127.0.0.1`로 크로스 오리진 POST를 보낼 수 있고, 응답을 읽지는 못해도 쓰기 자체는 반영됩니다. `curl`과 CLI는 두 헤더 모두 보내지 않으므로 영향이 없습니다. 읽기(`status`)는 제한하지 않습니다. 동일 출처 정책이 이미 페이지가 응답을 보지 못하도록 막기 때문입니다.
 
@@ -205,6 +205,7 @@ aipool enable <name>     # 다시 활성화(멈춰 있는 오류 상태도 해�
 aipool priority <name> 1 # 로테이션 우선순위 설정(낮을수록 우선)
 aipool route list        # 모델별 라우트 관리(add/rm)
 aipool threshold 90      # 다음 계정으로 전환되는 사용률 임계값
+aipool credits on        # Codex 플랜 한도 이후 구매 크레딧으로 계속 처리(off로 중단)
 aipool distribute on     # 새 세션을 우선순위가 같은 계정들에 분산
 aipool expiry on         # 쓰지 않으면 만료될 주간 쿼터부터 먼저 사용
 aipool probe 300         # 백그라운드 쿼터 갱신 활성화(기본값은 꺼짐)

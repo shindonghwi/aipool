@@ -3,6 +3,8 @@ import { findFamilyBlock, modelGlobOverlaps, gatingUtilization, resolveMaxUsage,
 import { safeLine } from './safe-text.js';
 import { ROUTE_COLORS } from './config-ops.js';
 import { PROVIDERS, providerOf } from './provider.js';
+import { readAgyStatus } from './agy-status.js';
+import { RESET_CREDIT_MAX_AGE_MS, heldResetCredits, creditsLeftText, resetCreditsAside } from './codex-credits.js';
 
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
@@ -79,6 +81,8 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
     if (spend) lines.push(`  ${spend}`);
     const resetCredits = resetCreditLine(account, paint, now);
     if (resetCredits) lines.push(`  ${resetCredits}`);
+    const purchased = purchasedCreditLine(account, paint);
+    if (purchased) lines.push(`  ${purchased}`);
     lines.push(`  ${paint.dim('Usage'.padEnd(8))} ${formatUsage(account.usage, now)}`);
     lines.push(`  ${paint.dim('Probe'.padEnd(8))} ${formatAccountProbe(nameText(account.name), probe, now, paint)}`);
     const adaptive = adaptiveFor(status, nameText(account.name));
@@ -106,6 +110,7 @@ export function renderStatus(status, { color = process.stdout.isTTY, now = Date.
     lines.push('');
   }
 
+  renderAgyStatus(lines, readAgyStatus(), paint, now);
   return lines.join('\n').trimEnd();
 }
 
@@ -245,6 +250,13 @@ export function renderStatusCompact(status, { color = process.stdout.isTTY, now 
       const bar = usageBar(used, paint, cap, { width: COMPACT_BAR, muted: off });
       lines.push(`    ${lbl} ${bar} ${pctTint(formatPercent(used).padStart(4))}  ${paint.dim(`${reset}${capText}`)}`.trimEnd());
     }
+    // Purchased credits sit under the bars whenever the account holds some:
+    // the balance is capacity past the plan limit, and whether aipool may
+    // spend it is the operator's call, so both are on the card.
+    const credits = creditStanding(account);
+    if (credits) {
+      lines.push(`    ${paint.dim('Credits'.padEnd(7))} ${off ? paint.gray(credits.held) : paint.cyan(credits.held)}${paint.dim(` · ${credits.decision}`)}`);
+    }
     lines.push('');
   };
   for (const group of groups) {
@@ -263,6 +275,8 @@ export function renderStatusCompact(status, { color = process.stdout.isTTY, now 
     group.rows.forEach(row => pushCard(row, columns));
   }
 
+  renderAgyStatus(lines, readAgyStatus(), paint, now);
+
   // ── Needs attention: only what a person should act on or know ──
   const attention = [];
   if (blocked.length) attention.push(`${paint.red('blocked models')} ${blocked.join(', ')}`);
@@ -280,8 +294,18 @@ export function renderStatusCompact(status, { color = process.stdout.isTTY, now 
     if (probeRow && !['ok', 'running', 'never', 'not-applicable'].includes(probeRow.status)) {
       attention.push(`${who}: ${paint.yellow('quota figures are not refreshing')}${probeRow.error ? paint.dim(` (${safeLine(probeRow.error, 60)})`) : ''}`);
     }
-    const credits = heldResetCredits(account.quota, now);
-    if (credits) attention.push(`${who}: ${paint.cyan(`${credits} free limit reset${credits === 1 ? '' : 's'} available`)}`);
+    // Purchased credits, and the free resets told alongside them. The resets
+    // are only ever reported: aipool does not redeem them.
+    const resets = resetCreditsAside(account.quota, now);
+    if (account.creditsQuestion) {
+      attention.push(`${who}: ${paint.yellow(`plan limit reached, ${creditsLeftText(account.quota)} — keep going on credits?`)} aipool credits on | off`
+        + (resets ? paint.dim(` (${resets})`) : ''));
+    } else {
+      if (account.onCredits) {
+        attention.push(`${who}: ${paint.yellow(`⚠ spending purchased credits — ${creditsLeftText(account.quota)}`)}${paint.dim(' (stop: aipool credits off)')}`);
+      }
+      if (resets) attention.push(`${who}: ${paint.cyan(resets)}`);
+    }
   });
   if (attention.length) {
     lines.push(paint.bold('Needs attention'));
@@ -304,6 +328,31 @@ export function renderStatusCompact(status, { color = process.stdout.isTTY, now 
   if (attention.length || routes.length) lines.push('');
   lines.push(paint.dim('More detail: aipool status -v'));
   return lines.join('\n');
+}
+
+/**
+ * The Antigravity block: the quota the Antigravity CLI last reported through
+ * its status line (see agy-status.js), or nothing when it never has.
+ * @param {string[]} lines
+ * @param {ReturnType<typeof readAgyStatus>} agy
+ * @param {ReturnType<typeof colors>} paint
+ * @param {number} now
+ */
+function renderAgyStatus(lines, agy, paint, now) {
+  if (!agy) return;
+  const stale = now - agy.observedAt > 600_000;
+  lines.push(paint.bold('Antigravity'));
+  lines.push(`○ ${nameText(agy.email)}  ${paint.dim(stale ? 'last observed' : 'observed')}`);
+  for (const [label, key] of [['Gemini 5h', 'gemini-5h'], ['Gemini week', 'gemini-weekly'], ['Claude/GPT 5h', '3p-5h'], ['Claude/GPT week', '3p-weekly']]) {
+    const bucket = agy.quota[key];
+    const remaining = bucket?.remaining_fraction;
+    if (typeof remaining !== 'number' || remaining < 0 || remaining > 1) continue;
+    const used = 1 - remaining;
+    const resetTs = parseTs(bucket.reset_time);
+    const reset = resetTs && resetTs > now ? `resets in ${formatDuration(resetTs - now)}` : '';
+    lines.push(`    ${paint.dim(label.padEnd(15))} ${usageBar(used, paint, null, { width: COMPACT_BAR })} ${formatPercent(used).padStart(4)}  ${paint.dim(reset)}`.trimEnd());
+  }
+  lines.push('');
 }
 
 /**
@@ -336,6 +385,18 @@ function compactRow(account, status, now) {
 
   if (account.disabled) {
     Object.assign(row, { rank: 4, state: 'disabled', tint: /** @type {Tint} */ (p => p.gray) });
+  } else if (account.onCredits) {
+    // Past its plan limit and serving anyway, on purchased credits the operator
+    // allowed: available, but in the colour of money being spent.
+    const state = ['on credits', creditsLeftText(account.quota).replace(/ credits left$/, ' left')];
+    if (active > 0) state.push(`${active} active`);
+    Object.assign(row, { rank: active > 0 ? 0 : 1, order: -active, state: state.join(' · '), tint: /** @type {Tint} */ (p => p.yellow) });
+  } else if (account.onPlanRemainder) {
+    // Past its switch threshold, but nothing else has headroom, so it spends
+    // the rest of its plan: still free, and still available.
+    const state = ['using the rest of its plan'];
+    if (active > 0) state.push(`${active} active`);
+    Object.assign(row, { rank: active > 0 ? 0 : 1, order: -active, state: state.join(' · ') });
   } else if (account.unavailable === 'error' || account.status === 'error') {
     Object.assign(row, { rank: 3, state: 'error', tint: /** @type {Tint} */ (p => p.red) });
   } else if (account.unavailable) {
@@ -481,33 +542,57 @@ export function resetCreditLine(account, paint, now = Date.now()) {
   return `${paint.dim('Reset'.padEnd(8))} ${paint.cyan(`${available} ${noun}`)}${paint.gray(note)}`;
 }
 
-// How long a reset-credit reading is worth showing. Nothing refreshes the count
-// but the usage probe, and the probe is off by default, so a credit that was
-// redeemed or expired would otherwise stay on screen indefinitely. A week is the
-// longest Codex window: past it, every window the credit could have reset has
-// reset on its own, and the reading describes a situation that is gone.
-export const RESET_CREDIT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// The reset-credit age rule lives beside the credit question in codex-credits.js;
+// re-exported here because the TUI and the dashboard have always read it here.
+export { RESET_CREDIT_MAX_AGE_MS, heldResetCredits };
 
 /**
- * How many reset credits to REPORT for this quota: the held count while the
- * reading is fresh, 0 once it is older than RESET_CREDIT_MAX_AGE_MS or states
- * no positive count. One rule for the status screen and the TUI row, so the two
- * cannot disagree about whether a credit is there (the dashboard page applies
- * the same cut-off in its own serialized helper).
+ * The purchased-credit line of `status -v`, or null when the account has never
+ * reported any. Says what is held and what the operator has decided about it,
+ * since that decision is what turns the balance into capacity.
  *
- * A reading with no `seenAt` is shown: its age is unknown rather than old, and
- * every reading the proxy stores itself is stamped.
- *
- * @param {Record<string, any>|null|undefined} quota
- * @param {number} [now]  ms epoch the age is measured from
- * @returns {number}
+ * @param {Record<string, any>|null|undefined} account  a row of the status payload
+ * @param {ReturnType<typeof colors>} paint
  */
-export function heldResetCredits(quota, now = Date.now()) {
-  const credits = quota?.resetCredits;
-  const available = credits?.available;
-  if (!Number.isFinite(available) || available <= 0) return 0;
-  if (Number.isFinite(credits.seenAt) && now - credits.seenAt > RESET_CREDIT_MAX_AGE_MS) return 0;
-  return available;
+export function purchasedCreditLine(account, paint) {
+  if (!holdsCredits(account)) return null;
+  const c = account.quota.credits;
+  const held = creditsLeftText(account.quota);
+  const decision = c.overageLimitReached === true ? 'spend control reached, none usable'
+    : account.onCredits ? 'spending now (aipool credits off to stop)'
+    : account.useCredits === true ? `used once the plan is spent${Number(account.useCreditsUntil) > 0 ? ', until the weekly reset' : ''}`
+    : account.useCredits === false ? 'not used (aipool credits on to allow)'
+    : 'not allowed yet (aipool credits on to allow)';
+  return `${paint.dim('Credits'.padEnd(8))} ${paint.cyan(held)}${paint.gray(` — ${decision}`)}`;
+}
+
+/**
+ * Whether this account reports purchased credits worth showing: a balance,
+ * or overage paid without one.
+ * @param {Record<string, any>|null|undefined} account
+ * @returns {account is Record<string, any>}
+ */
+function holdsCredits(account) {
+  const c = account?.quota?.credits;
+  return !!c && (c.hasCredits === true || c.unlimited === true || Number(c.balance) > 0);
+}
+
+/**
+ * The card's Credits line in words: what is held, and the short form of what
+ * the operator decided about it. Null when the account holds none.
+ * @param {Record<string, any>|null|undefined} account  a row of the status payload
+ * @returns {{held: string, decision: string}|null}
+ */
+export function creditStanding(account) {
+  if (!account || !holdsCredits(account)) return null;
+  const c = account.quota.credits;
+  const held = creditsLeftText(account.quota).replace(/ credits left$/, ' left');
+  const decision = c.overageLimitReached === true ? 'spend limit reached'
+    : account.onCredits ? 'spending now'
+    : account.useCredits === true ? 'on'
+    : account.useCredits === false ? 'off'
+    : 'not asked yet';
+  return { held, decision };
 }
 
 export function unavailableLine(account, paint) {

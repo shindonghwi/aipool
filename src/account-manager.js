@@ -1,7 +1,7 @@
 import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired, formatMoney } from './oauth.js';
 import { providerOf, DEFAULT_PROVIDER, isSubscriptionAccount, canServeProvider } from './provider.js';
 import { refreshCodexToken } from './codex-auth.js';
-import { parseCodexQuota, parseCodexPlanType } from './codex-quota.js';
+import { parseCodexQuota, parseCodexPlanType, parseCodexCredits } from './codex-quota.js';
 import { sameIdentity } from './identity.js';
 import { weeklyBucketForModel, modelGlobMatches, modelFamily, gatingUtilization, resolveMaxUsage, resolveSwitchThreshold, sanitizeSwitchThreshold, WEEKLY_BUCKET_KEYS } from './model.js';
 import { SessionTracker } from './session-tracker.js';
@@ -105,6 +105,10 @@ const PERSISTED_QUOTA_FIELDS = [
   // until something next reads /wham/usage — and the row that says so is the
   // only place an operator sees one at all.
   'resetCredits',
+  // Codex purchased credits, `{ hasCredits, unlimited, overageLimitReached,
+  // balance, seenAt }`. Persisted for the same reason: after a restart the
+  // credit question in `aipool status` should not wait for the next response.
+  'credits',
 ];
 
 // The family (Fable/Sonnet) weekly buckets and the field holding when each was
@@ -130,8 +134,48 @@ const FAMILY_WEEKLY_BUCKETS = [
  * @typedef {object} CodexLearnedQuota
  * @property {string} [planType]  the Codex subscription tier
  * @property {{available: number, applicable: number|null, seenAt: number}} [resetCredits]  free rate-limit reset credits held, and when that was last seen
+ * @property {CodexCredits} [credits]  purchased credits, and when they were last seen
  * @property {Record<string, {name: string, utilization: number, resetAt: number|null, seenAt: number}>} [codexModelBuckets]  model-scoped weekly buckets, keyed by slug
  */
+
+/**
+ * A Codex account's purchased credits as last reported — by a response's
+ * `x-codex-credits-*` headers or by `/wham/usage`. Each flag is absent until a
+ * reading states it.
+ *
+ * @typedef {object} CodexCredits
+ * @property {boolean} [hasCredits]  holds a balance ChatGPT will spend past the plan limit
+ * @property {boolean} [unlimited]  the workspace pays for overage without a balance
+ * @property {boolean} [overageLimitReached]  the owner's spend control on that overage has tripped
+ * @property {number} [balance]  credits left
+ * @property {number} seenAt  ms epoch of the reading
+ */
+
+/**
+ * `accounts[].useCredits` as the manager holds it: true when the operator said
+ * to keep serving on purchased credits past the plan limit, false when they
+ * said not to, null while they have not been asked. Anything else in the
+ * config reads as not asked, so a typo asks again rather than spending.
+ *
+ * @param {Record<string, any>} acct
+ * @returns {boolean|null}
+ */
+export function accountUseCredits(acct) {
+  return acct?.useCredits === true ? true : acct?.useCredits === false ? false : null;
+}
+
+/**
+ * `accounts[].useCreditsUntil`: the weekly reset (ms epoch) the credit answer
+ * was given for, after which it lapses and the question is asked again. Null
+ * when absent or not a time, which leaves the answer standing.
+ *
+ * @param {Record<string, any>} acct
+ * @returns {number|null}
+ */
+export function accountUseCreditsUntil(acct) {
+  const until = Number(acct?.useCreditsUntil);
+  return acct?.useCreditsUntil != null && Number.isFinite(until) && until > 0 ? until : null;
+}
 
 function emptyQuota() {
   return {
@@ -240,6 +284,13 @@ function makeAccount(acct, index) {
     // PREFERENCE like the fleet setting, not the hard cap maxUsage is. See
     // thresholdFor() for the resolution order.
     switchThreshold: accountSwitchThreshold(acct),
+    // Codex only: whether this account may keep serving on purchased credits
+    // once its plan limit is spent, and the weekly reset that answer lapses
+    // at. See creditsAnswer and _selectPastThreshold.
+    useCredits: accountUseCredits(acct),
+    useCreditsUntil: accountUseCreditsUntil(acct),
+    // When the "serving on credits" log line may next be printed (ms epoch).
+    creditsLogAt: 0,
     upstream: acct.upstream || null,
     modelMap: acct.modelMap || null,
     // Fields to drop from request bodies for this account (third-party upstreams
@@ -1005,6 +1056,15 @@ export class AccountManager {
     if (diverted) return diverted;
     const next = this._selectNext(exclude, model, advisorModel);
     if (next) return next;
+    // No account is under its switch threshold. For Codex, what is left of a
+    // plan serves next, then purchased credits the operator allowed — before
+    // the throttled probe below would refuse every request but one a minute.
+    // Final pass only: the advisor-constrained one fails soft and must not
+    // move the cursor.
+    if (allowProbe) {
+      const pastThreshold = this._selectPastThreshold(exclude, model);
+      if (pastThreshold) return pastThreshold;
+    }
     // No account is under the switch threshold. Before refusing locally, allow a
     // throttled probe so a stale/poisoned cached quota can't pin us in a
     // permanent "all exhausted" state — the probe's real response refreshes the
@@ -1749,6 +1809,9 @@ export class AccountManager {
       // might refresh, so the exhausted-fleet probe does not get to override it.
       // Checked here rather than in _isProbeable because a cap is model-scoped.
       if (this.capExceeded(account, model)) continue;
+      // A Codex account past its plan, holding credits nobody allowed: upstream
+      // would bill the probe to them.
+      if (this._creditsGuarded(account, model)) continue;
       // Same for routing/ownership: a probe for a routed or owned model must not
       // land on an ineligible account (it would just reject the unknown model id).
       if (model && !this._routeAllows(account, model)) continue;
@@ -1770,6 +1833,239 @@ export class AccountManager {
       console.log(`[AIPool] All accounts unavailable — revalidating throttled "${best.name}" with a live request`);
     } else {
       console.log(`[AIPool] All accounts over threshold — probing "${best.name}" to refresh quota`);
+    }
+    return best;
+  }
+
+  /**
+   * Merge a purchased-credit reading into the account. A field the reading did
+   * not state keeps its earlier value: the response headers carry no spend
+   * control flag, and one response must not erase what `/wham/usage` said.
+   * @param {Record<string, any>} account
+   * @param {{hasCredits?: boolean, unlimited?: boolean, overageLimitReached?: boolean, balance?: number}} reading
+   */
+  _noteCodexCredits(account, reading) {
+    /** @type {typeof account.quota & CodexLearnedQuota} */
+    const q = account.quota;
+    q.credits = { ...(q.credits || {}), ...reading, seenAt: Date.now() };
+  }
+
+  /**
+   * Whether upstream would bill this account's traffic to purchased credits
+   * once its plan limit is spent: a Codex account holding a balance (or on
+   * unlimited overage) whose owner's spend control has not tripped. Says
+   * nothing about whether the operator allowed it — see `useCredits`.
+   * @param {Record<string, any>} account
+   */
+  hasUsableCredits(account) {
+    if (providerOf(account) !== 'codex') return false;
+    /** @type {CodexCredits|undefined} */
+    const c = account?.quota?.credits;
+    if (!c || c.overageLimitReached === true) return false;
+    return c.unlimited === true || c.hasCredits === true;
+  }
+
+  /**
+   * The operator's answer for `account` — true (spend credits), false (do
+   * not), or null (not asked) — as it stands NOW. An answer is given for one
+   * weekly window: `useCreditsUntil` is that window's reset, and once it passes
+   * the answer lapses and the question is asked again the next time the plan
+   * runs out. A refilled week is free capacity; spending credits through it on
+   * last week's say-so would be the expensive mistake.
+   * @param {Record<string, any>} account
+   * @param {number} [now]
+   * @returns {boolean|null}
+   */
+  creditsAnswer(account, now = Date.now()) {
+    const answer = account?.useCredits;
+    if (answer !== true && answer !== false) return null;
+    const until = account.useCreditsUntil;
+    if (Number.isFinite(until) && now >= until) return null;
+    return answer;
+  }
+
+  /**
+   * Whether `account`'s plan is actually spent for `model`: a shared window at
+   * or past 100%, as opposed to past the switch threshold with some left. For
+   * a Codex account holding credits this is the line upstream bills across, so
+   * it is the line the credit question is asked at.
+   * @param {Record<string, any>} account
+   * @param {string|null} [model]
+   */
+  _planSpent(account, model = null) {
+    const q = account.quota;
+    if (q.unified5h != null && q.unified5h >= 1) return true;
+    const weekly = this._governingWeekly(account, model);
+    return weekly != null && weekly >= 1;
+  }
+
+  /**
+   * Whether `account` is held back by nothing but the switch threshold (or its
+   * spent plan), and could take `model` on a route that allows it. Shared by
+   * both past-threshold fallbacks below.
+   * @param {Record<string, any>} account
+   * @param {string|null} [model]
+   */
+  _blockedOnlyByQuota(account, model = null) {
+    if (providerOf(account) !== 'codex' || account.disabled) return false;
+    /** @type {any} */
+    const m = model;
+    if (this.unavailableReason(account, m) !== 'quota') return false;
+    // unavailableReason answers 'quota' before it reaches the route check.
+    return !m || this._routeAllows(account, m);
+  }
+
+  /**
+   * Whether `account` would serve on purchased credits: its plan is spent and
+   * upstream holds credits it would bill. Says nothing about whether the
+   * operator allowed it — see creditsAnswer.
+   * @param {Record<string, any>} account
+   * @param {string|null} [model]
+   */
+  _creditsWouldServe(account, model = null) {
+    return this.hasUsableCredits(account)
+      && this._blockedOnlyByQuota(account, model)
+      && this._planSpent(account, model);
+  }
+
+  /**
+   * Where a Codex request goes when no account is under its switch threshold,
+   * without moving anything. In order of cost:
+   *
+   *  - `plan`: an account past its threshold whose plan is NOT spent. What is
+   *    left of its window is quota already paid for; the threshold exists to
+   *    move traffic somewhere better first, and there is nowhere better.
+   *  - `credits`: an account whose plan is spent, holding credits the operator
+   *    said may be spent this week.
+   *
+   * Lowest priority value wins within each. Null when neither exists.
+   * @param {Set<number>|null} [exclude]
+   * @param {string|null} [model]
+   * @returns {{account: Record<string, any>, mode: 'plan'|'credits'}|null}
+   */
+  _pastThresholdChoice(exclude = null, model = null) {
+    /** @type {Record<string, any>|null} */
+    let plan = null;
+    /** @type {Record<string, any>|null} */
+    let credits = null;
+    const better = (/** @type {Record<string, any>|null} */ best, /** @type {Record<string, any>} */ a) =>
+      !best || (a.priority || 0) < (best.priority || 0);
+    for (const account of this.accounts) {
+      if (exclude?.has(account.index)) continue;
+      if (!this._blockedOnlyByQuota(account, model)) continue;
+      if (!this._planSpent(account, model)) {
+        if (better(plan, account)) plan = account;
+      } else if (this.creditsAnswer(account) === true && this.hasUsableCredits(account)) {
+        if (better(credits, account)) credits = account;
+      }
+    }
+    if (plan) return { account: plan, mode: 'plan' };
+    if (credits) return { account: credits, mode: 'credits' };
+    return null;
+  }
+
+  /** What the past-threshold fallback would do for a Codex request right now,
+   * or null while some account still has headroom under its threshold. */
+  _codexFallbackNow() {
+    const exclude = this._excludeOtherProviders(null, 'codex');
+    if (this._pickBestAvailable(exclude)) return null;
+    return this._pastThresholdChoice(exclude);
+  }
+
+  /**
+   * Is `account` the one Codex traffic is billed to on purchased credits right
+   * now. Asked through the same helpers selection uses, so `aipool status`
+   * cannot say credits are being spent while something cheaper is serving.
+   * @param {Record<string, any>} account
+   */
+  onCredits(account) {
+    const choice = this._codexFallbackNow();
+    return choice?.mode === 'credits' && choice.account === account;
+  }
+
+  /**
+   * Is `account` serving past its switch threshold on what is left of its plan.
+   * @param {Record<string, any>} account
+   */
+  onPlanRemainder(account) {
+    const choice = this._codexFallbackNow();
+    return choice?.mode === 'plan' && choice.account === account;
+  }
+
+  /**
+   * Should the operator be asked whether `account` may run on credits: its
+   * plan is spent, it holds credits upstream would bill, nobody has answered
+   * for this week, and nothing cheaper can take Codex traffic instead.
+   * @param {Record<string, any>} account
+   */
+  creditsQuestionPending(account) {
+    if (this.creditsAnswer(account) != null) return false;
+    if (!this._creditsWouldServe(account)) return false;
+    const exclude = this._excludeOtherProviders(null, 'codex');
+    return !this._pickBestAvailable(exclude) && !this._pastThresholdChoice(exclude);
+  }
+
+  /**
+   * Is `account` a Codex account aipool is holding back with no live request
+   * going to it — so nothing would notice if its limit reset early. Codex
+   * resets limits ahead of schedule now and then, and a free reset credit can
+   * be redeemed by hand; a response would carry the new figures, but a held
+   * account gets none. The prober reads its zero-spend usage endpoint instead.
+   *
+   * `quietSince`: skip an account that answered a live request after this
+   * time (ms epoch) — its figures came from upstream just now.
+   * @param {Record<string, any>} account
+   * @param {number} [quietSince]
+   */
+  codexHeldBack(account, quietSince = Infinity) {
+    if (providerOf(account) !== 'codex' || account.disabled || account.status === 'error') return false;
+    const reason = this.unavailableReason(account);
+    if (reason !== 'quota' && reason !== 'throttled' && reason !== 'exhausted') return false;
+    if (this.onCredits(account) || this.onPlanRemainder(account)) return false;
+    const last = Date.parse(account.usage?.lastUsed || '');
+    return !(Number.isFinite(last) && last > quietSince);
+  }
+
+  /**
+   * Must the exhausted-fleet probe leave `account` alone: a Codex account
+   * whose plan is spent and which holds credits nobody said it may spend. A
+   * probe is a live request, and upstream would bill it to the credits — the
+   * one thing the question exists to prevent.
+   * @param {Record<string, any>} account
+   * @param {string|null} [model]
+   */
+  _creditsGuarded(account, model = null) {
+    return providerOf(account) === 'codex'
+      && this.hasUsableCredits(account)
+      && this._planSpent(account, model)
+      && this.creditsAnswer(account) !== true;
+  }
+
+  /**
+   * Serve a Codex request when no account is under its switch threshold: the
+   * rest of a plan first, then purchased credits the operator allowed. Null
+   * when neither exists — the caller then falls back to the probe and the
+   * synthetic 429, exactly as before.
+   * @param {Set<number>|null} [exclude]
+   * @param {string|null} [model]
+   */
+  _selectPastThreshold(exclude = null, model = null) {
+    const choice = this._pastThresholdChoice(exclude, model);
+    if (!choice) return null;
+    const best = choice.account;
+    if (this.currentIndex !== best.index) this._setCurrent(best);
+    // Once per account per ten minutes: every request lands here while the
+    // fleet is past its thresholds, and the line exists to say where the
+    // traffic went, not to count requests.
+    const now = Date.now();
+    if (now >= (best.creditsLogAt || 0)) {
+      best.creditsLogAt = now + 10 * 60_000;
+      if (choice.mode === 'plan') {
+        console.log(`[AIPool] Every account is past its switch threshold — using the rest of "${safeLine(best.name, 64)}"'s plan`);
+      } else {
+        const balance = /** @type {CodexLearnedQuota} */ (best.quota).credits?.balance;
+        console.log(`[AIPool] Plan limit reached — serving on credits with "${safeLine(best.name, 64)}"${balance == null ? '' : ` (${Math.floor(balance)} left)`}`);
+      }
     }
     return best;
   }
@@ -3345,6 +3641,8 @@ export class AccountManager {
     // stripped and bounded here rather than trusted from a third-party upstream.
     const plan = parseCodexPlanType(headers);
     if (plan) account.quota.planType = safeLine(plan, 64);
+    const credits = parseCodexCredits(headers);
+    if (credits) this._noteCodexCredits(account, credits);
 
     if (parsed.unified5h != null) account.quota.unified5h = parsed.unified5h;
     if (parsed.unified7d != null) {
@@ -3713,6 +4011,8 @@ export class AccountManager {
     // empty-quota shape does not carry them. See CodexLearnedQuota.
     /** @type {typeof account.quota & CodexLearnedQuota} */
     const q = account.quota;
+    const wasSpent = this._planSpent(account);
+    const before = q.unified7d;
     if (usage.fiveHour) {
       q.unified5h = usage.fiveHour.utilization;
       q.unified5hReset = usage.fiveHour.resetAt ?? null;
@@ -3726,6 +4026,17 @@ export class AccountManager {
     // credits leaves the last reading alone rather than blanking it, so the
     // age is the only thing that says how much the number is worth.
     if (usage.resetCredits) q.resetCredits = { ...usage.resetCredits, seenAt: Date.now() };
+    if (usage.credits) this._noteCodexCredits(account, usage.credits);
+    // An early reset: the plan was spent by the last reading and is not now.
+    // Said once, because it is the moment the account comes back.
+    if (wasSpent && !this._planSpent(account)) {
+      const pct = (/** @type {number|null|undefined} */ v) => v == null ? '?' : `${Math.round(v * 100)}%`;
+      console.log(`[AIPool] "${safeLine(account.name, 64)}" limit reset early (weekly ${pct(before)} → ${pct(q.unified7d)}) — back on its plan`);
+    }
+    // A hold armed by the 429 that spent the plan would otherwise outlive an
+    // early reset by days. Upstream saying the limit is not reached is the live
+    // proof clearRateLimited asks for.
+    if (usage.limitReached === false && account.status === 'throttled') this.clearRateLimited(accountIndex);
     if (Array.isArray(usage.modelBuckets)) {
       q.codexModelBuckets = Object.fromEntries(usage.modelBuckets.slice(0, MAX_CODEX_MODEL_BUCKETS)
         .filter(bucket => bucket?.slug)
@@ -4145,6 +4456,14 @@ export class AccountManager {
         // consumer) can resolve it with the shared resolveSwitchThreshold
         // rather than only seeing this account's already-resolved default.
         switchThreshold: a.switchThreshold ?? null,
+        // Codex purchased credits: the operator's answer (true/false, null =
+        // not asked), whether the account is spending them right now, and
+        // whether the question is waiting on the operator.
+        useCredits: this.creditsAnswer(a),
+        useCreditsUntil: a.useCreditsUntil ?? null,
+        onCredits: this.onCredits(a),
+        onPlanRemainder: this.onPlanRemainder(a),
+        creditsQuestion: this.creditsQuestionPending(a),
         status: a.status,
         // Why the account is out of rotation right now (null = it can serve).
         // Distinguishes a local threshold decision from an upstream rejection —

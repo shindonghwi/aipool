@@ -18,6 +18,10 @@ import { fetchCodexUsage } from './codex-usage.js';
 // seconds, so the ceiling lives here where the timer is armed.
 export const MAX_PROBE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 
+// How often a held-back Codex account's usage is re-read (see watchCodex).
+// The Codex CLI polls the same endpoint every minute on its own.
+export const CODEX_WATCH_MS = 2 * 60 * 1000;
+
 function clampInterval(ms) {
   return ms > 0 ? Math.min(ms, MAX_PROBE_INTERVAL_MS) : 0;
 }
@@ -30,7 +34,7 @@ export class Prober {
   // notices below are produced later still, by a reload that changes the probe
   // interval, so a captured `console.log` would put them on a terminal the
   // alternate screen has already covered.
-  constructor(accountManager, { intervalMs = 0, probeFn = fetchUsage, codexProbeFn = fetchCodexUsage, profileFn = null, backendFn = fetchBackendQuota, timeoutMs = 10_000, log = (/** @type {string} */ line) => console.log(line) } = {}) {
+  constructor(accountManager, { intervalMs = 0, probeFn = fetchUsage, codexProbeFn = fetchCodexUsage, profileFn = null, backendFn = fetchBackendQuota, timeoutMs = 10_000, codexWatchMs = CODEX_WATCH_MS, log = (/** @type {string} */ line) => console.log(line) } = {}) {
     this.am = accountManager;
     this.intervalMs = clampInterval(intervalMs);
     this.probeFn = probeFn;
@@ -45,10 +49,45 @@ export class Prober {
     this.lastRunFinishedAt = null;
     this.nextRunAt = this.intervalMs > 0 ? Date.now() + this.intervalMs : null;
     this.accountStatus = new Map();
+    this.codexWatchMs = codexWatchMs;
+    this.codexWatchTimer = null;
+    this._watching = false;
   }
 
   start() {
     if (this.intervalMs > 0) this.reschedule(this.intervalMs);
+    // Not part of the opt-in probe: it reads only accounts aipool is holding
+    // back, and only the zero-spend endpoint. See watchCodex.
+    if (this.codexWatchMs > 0 && !this.codexWatchTimer) {
+      this.codexWatchTimer = setInterval(() => this.watchCodex().catch(() => {}), this.codexWatchMs);
+      this.codexWatchTimer.unref?.();
+    }
+  }
+
+  /**
+   * Re-read the usage of every Codex account aipool is holding back with no
+   * live traffic (AccountManager.codexHeldBack), so a limit that resets early
+   * is noticed within one interval rather than at its stated reset. Codex does
+   * reset limits ahead of schedule now and then, and an account owner can
+   * redeem a free reset credit by hand; neither reaches a proxy that has
+   * stopped sending the account requests. Zero-spend: `/wham/usage` is the
+   * endpoint the Codex CLI itself polls every minute.
+   *
+   * Skipped while the opt-in probe already reads every account at least as
+   * often.
+   */
+  async watchCodex() {
+    if (this._watching) return;
+    if (this.intervalMs > 0 && this.intervalMs <= this.codexWatchMs) return;
+    this._watching = true;
+    try {
+      const quietSince = Date.now() - this.codexWatchMs;
+      const targets = this.am.accounts.filter((/** @type {Record<string, any>} */ account) =>
+        this._probeable(account) && this._isCodexProbeTarget(account) && this.am.codexHeldBack(account, quietSince));
+      await Promise.all(targets.map((/** @type {Record<string, any>} */ account) => this._probeCodex(account, Date.now())));
+    } finally {
+      this._watching = false;
+    }
   }
 
   /** Change interval at runtime (0 = off). Probes once immediately when on. */
@@ -74,6 +113,7 @@ export class Prober {
 
   stop() {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.codexWatchTimer) { clearInterval(this.codexWatchTimer); this.codexWatchTimer = null; }
     this.nextRunAt = null;
   }
 

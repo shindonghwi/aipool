@@ -38,6 +38,8 @@ import { RemoteControl, createAttachSession } from './tui-remote.js';
 import { SxManager } from './sx.js';
 import { autoUpdate, checkForUpdate, currentVersion, resolveVersionLabel, runUpdate, installKind, updateAvailableFromCache, PKG_NAME, isPrivateBuild } from './updater.js';
 import { renderStatus, renderStatusCompact, formatPercent } from './status-renderer.js';
+import { creditsLeftText, resetCreditsAside } from './codex-credits.js';
+import { providerOf } from './provider.js';
 import { sanitizeText } from './safe-text.js';
 import { ClientUsageTracker, UsageDimensionTracker } from './client-usage.js';
 import { buildClaudeEnvLines, bypassesAllHosts, claudeLaunchArgs, clearSelfProxyEnvLines, encodePinComponent, mergeNoProxy, resolveClientMode } from './claude-env.js';
@@ -87,6 +89,16 @@ const THRESHOLD_USAGE = [
   'The utilization at which rotation stops sending work to an account. Tenths of',
   'a percent are kept, as on the TUI settings screen. Changes apply to a running',
   'server immediately.',
+].join('\n');
+
+const CREDITS_USAGE = [
+  'Usage: aipool credits                    (show each Codex account\'s credits and setting)',
+  '       aipool credits on  [account]      (keep serving on purchased credits once the plan is spent)',
+  '       aipool credits off [account]      (stop when the plan is spent)',
+  '',
+  'Without an account name, applies to every Codex account. An answer holds until',
+  'the account\'s weekly limit resets; the next time its plan runs out, you are',
+  'asked again. Free limit resets are only reported; aipool never redeems them.',
 ].join('\n');
 
 const DISTRIBUTE_USAGE = 'Usage: aipool distribute <on|off|adaptive>';
@@ -179,6 +191,10 @@ switch (command) {
     break;
   case 'threshold':
     await thresholdCommand();
+    process.exit(0);
+    break;
+  case 'credits':
+    await creditsCommand();
     process.exit(0);
     break;
   case 'distribute':
@@ -2162,6 +2178,106 @@ async function priorityCommand() {
   await notifyRunningServer(config);
 }
 
+// ── credits ─────────────────────────────────────────────────
+
+/**
+ * The running server's status rows by account name, or an empty map when no
+ * server answers. The credit balance and the weekly reset live there; the
+ * answer lives in config.
+ * @param {Record<string, any>} config
+ * @returns {Promise<Map<string, Record<string, any>>>}
+ */
+async function liveAccountRows(config) {
+  /** @type {Map<string, Record<string, any>>} */
+  const live = new Map();
+  try {
+    const res = await fetch(`http://localhost:${config.proxy.port}/aipool/status`, {
+      headers: { 'x-api-key': config.proxy.apiKey },
+      signal: AbortSignal.timeout(5_000),
+    });
+    const data = await res.json();
+    for (const a of data.accounts || []) live.set(a.name, a);
+  } catch { /* server not running */ }
+  return live;
+}
+
+/** "in 4d2h" for a future ms epoch, for the credits listing. */
+function untilText(/** @type {number} */ until) {
+  const ms = until - Date.now();
+  const hours = Math.max(0, Math.round(ms / 3_600_000));
+  return hours >= 24 ? `in ${Math.floor(hours / 24)}d${hours % 24}h` : `in ${hours}h`;
+}
+
+async function creditsCommand() {
+  const config = await loadOrCreateConfig();
+  const sub = args[1];
+  const codexAccounts = config.accounts.filter((/** @type {Record<string, any>} */ a) => providerOf(a) === 'codex');
+
+  if (!sub || sub === 'list' || sub === 'status') {
+    if (!codexAccounts.length) { console.log('No Codex accounts configured.'); return; }
+    const live = await liveAccountRows(config);
+    for (const account of codexAccounts) {
+      const row = live.get(account.name);
+      // The server's answer has already lapsed at a passed weekly reset; with
+      // no server, apply the same rule to what config holds.
+      const until = Number(account.useCreditsUntil);
+      const lapsed = Number.isFinite(until) && until > 0 && Date.now() >= until;
+      const answer = row ? row.useCredits : (lapsed ? null : account.useCredits);
+      const setting = answer === true ? 'on' : answer === false ? 'off' : 'not asked yet';
+      const parts = [`credits ${setting}${answer != null && Number.isFinite(until) && until > 0 ? ` until the weekly reset (${untilText(until)})` : ''}`];
+      if (row?.quota?.credits) parts.push(creditsLeftText(row.quota));
+      if (row?.onCredits) parts.push('spending now');
+      else if (row?.onPlanRemainder) parts.push('using the rest of its plan');
+      else if (row?.creditsQuestion) parts.push('plan limit reached — waiting for your answer');
+      const resets = row ? resetCreditsAside(row.quota) : '';
+      if (resets) parts.push(resets);
+      console.log(`${account.name}: ${parts.join(' · ')}`);
+    }
+    return;
+  }
+
+  if (sub !== 'on' && sub !== 'off') {
+    console.error(CREDITS_USAGE);
+    process.exit(1);
+  }
+
+  const name = args[2] && !args[2].startsWith('--') ? args[2] : null;
+  let targets = codexAccounts;
+  if (name) {
+    const account = resolveAccount(codexAccounts, name, argValue('--org'));
+    if (!account) {
+      console.error(`No Codex account matches "${name}"`);
+      process.exit(1);
+    }
+    targets = [account];
+  }
+  if (!targets.length) {
+    console.error('No Codex accounts configured.');
+    process.exit(1);
+  }
+
+  // An answer holds for the account's current weekly window. Its reset is
+  // known only to the running server; without one the answer stands until
+  // changed by hand, and the operator is told so.
+  const live = await liveAccountRows(config);
+  for (const account of targets) {
+    account.useCredits = sub === 'on';
+    const reset = Number(live.get(account.name)?.quota?.unified7dReset);
+    if (Number.isFinite(reset) && reset > Date.now()) account.useCreditsUntil = reset;
+    else delete account.useCreditsUntil;
+  }
+  await saveConfig(config);
+  for (const account of targets) {
+    const scope = account.useCreditsUntil
+      ? `until its weekly limit resets (${untilText(account.useCreditsUntil)}); you will be asked again after that`
+      : 'until you change it (weekly reset not known — is the server running?)';
+    console.log(sub === 'on'
+      ? `"${account.name}" serves on purchased credits once its plan is spent, ${scope}.`
+      : `"${account.name}" stops when its plan is spent, ${scope}.`);
+  }
+  await notifyRunningServer(config);
+}
+
 // ── enable / disable ────────────────────────────────────────
 
 async function setDisabledCommand(disabled) {
@@ -2241,6 +2357,8 @@ Commands:
   priority <name> <n> Set rotation priority (lower = preferred; --first/--last)
   route [list|add|rm] Per-model routing: pin model globs to specific accounts
                       (add <name> --match "<glob>" [--accounts "<name>"] [--bucket <b>])
+  credits [on|off]    Codex: keep serving on purchased credits past the plan
+                      limit (on), or stop there (off); no argument shows them
   threshold [pct]     Utilization at which rotation leaves an account (1-100);
                       per bucket with 'unified7d=90', and '=default' drops one
   distribute [on|off|adaptive]

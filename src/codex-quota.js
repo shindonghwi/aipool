@@ -249,6 +249,58 @@ export function codexSpentWindows(headers) {
  */
 export const isAccountWideCodexWindow = (label) => label === '5h' || label === 'weekly';
 
+/**
+ * A purchased-credit balance as a number, or null when it is not one.
+ *
+ * Upstream sends the balance as a decimal string (`"59933.9047185000"`) in the
+ * usage payload and the response header alike. Negative, infinite or
+ * non-numeric is dropped rather than read as zero: "no balance" and "we were not
+ * told" lead to different decisions.
+ *
+ * @param {unknown} value
+ * @returns {number|null}
+ */
+export function creditBalance(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/**
+ * The purchased credits a Codex response reports, or null when it reports none.
+ *
+ * Purchased credits are what ChatGPT bills once a plan's usage limit is spent,
+ * so an account with a balance keeps serving past 100% of its weekly window.
+ * They are not the free rate-limit reset credits (see codex-usage.js), which
+ * reset a window rather than pay for traffic past it.
+ *
+ *   x-codex-credits-has-credits: true
+ *   x-codex-credits-unlimited: false
+ *   x-codex-credits-balance: 59933.9047185000
+ *
+ * Each field is present only when the headers stated it, so a caller can merge
+ * the result over an earlier reading without blanking what this response left
+ * out.
+ *
+ * @param {Record<string, string>} headers
+ * @returns {{hasCredits?: boolean, unlimited?: boolean, balance?: number}|null}
+ */
+export function parseCodexCredits(headers) {
+  const flag = (/** @type {string} */ name) => {
+    const value = String(headers?.[name] ?? '').trim().toLowerCase();
+    return value === 'true' ? true : value === 'false' ? false : null;
+  };
+  /** @type {{hasCredits?: boolean, unlimited?: boolean, balance?: number}} */
+  const out = {};
+  const hasCredits = flag('x-codex-credits-has-credits');
+  const unlimited = flag('x-codex-credits-unlimited');
+  const balance = creditBalance(headers?.['x-codex-credits-balance']);
+  if (hasCredits != null) out.hasCredits = hasCredits;
+  if (unlimited != null) out.unlimited = unlimited;
+  if (balance != null) out.balance = balance;
+  return Object.keys(out).length ? out : null;
+}
+
 /** The subscription plan upstream reports, for status output. Null when absent. */
 export function parseCodexPlanType(headers) {
   const value = headers?.['x-codex-plan-type'];

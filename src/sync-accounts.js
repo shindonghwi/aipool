@@ -3,7 +3,7 @@ import { sameIdentity } from './identity.js';
 import { safeLine } from './safe-text.js';
 import { removedAccountIds } from './account-pairing.js';
 import { ensureAccountIds } from './account-id.js';
-import { accountSwitchThreshold } from './account-manager.js';
+import { accountSwitchThreshold, accountUseCredits, accountUseCreditsUntil } from './account-manager.js';
 
 /**
  * Sync accounts from disk config: add new accounts and refresh credentials
@@ -119,6 +119,9 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
     // and reported here as it would be at startup. The config entry below keeps
     // the operator's text as written: this only decides what the gate reads.
     mgr.switchThreshold = accountSwitchThreshold(diskAcct);
+    // `aipool credits on|off` writes this, and the next request must see it.
+    mgr.useCredits = accountUseCredits(diskAcct);
+    mgr.useCreditsUntil = accountUseCreditsUntil(diskAcct);
     // Third-party-backend bindings are read per request off this object
     // (`account.upstream || upstream`, `account.modelMap` in server.js), so a
     // disk edit must land here to take effect on reload. `|| null` mirrors the
@@ -151,6 +154,8 @@ export async function syncAccountsFromDisk(diskConfig, memConfig, accountManager
       if (diskAcct.messageThreads === true) cfgAcct.messageThreads = true; else delete cfgAcct.messageThreads;
       if (diskAcct.maxUsage != null) cfgAcct.maxUsage = diskAcct.maxUsage; else delete cfgAcct.maxUsage;
       if (diskAcct.switchThreshold != null) cfgAcct.switchThreshold = diskAcct.switchThreshold; else delete cfgAcct.switchThreshold;
+      if (typeof diskAcct.useCredits === 'boolean') cfgAcct.useCredits = diskAcct.useCredits; else delete cfgAcct.useCredits;
+      if (diskAcct.useCreditsUntil != null) cfgAcct.useCreditsUntil = diskAcct.useCreditsUntil; else delete cfgAcct.useCreditsUntil;
       if (diskAcct.priority != null) cfgAcct.priority = diskAcct.priority; else delete cfgAcct.priority;
       // The TUI's reorder writes this key onto the entry, so after one
       // arrangement every entry carries a value for a hand edit to lose to.
