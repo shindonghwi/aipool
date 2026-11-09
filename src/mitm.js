@@ -194,6 +194,26 @@ export function upgradeUpstreamFor(hostHeader, config, upstream) {
   return null;
 }
 
+/** How long a blind tunnel may take to reach its destination. */
+export const TUNNEL_CONNECT_TIMEOUT_MS = 30_000;
+
+/**
+ * How long an ESTABLISHED blind tunnel may carry no bytes either way before it
+ * is closed. It used to be the connect bound above, 30s, left armed for the
+ * life of the tunnel — so any request whose server thinks for longer than that
+ * before answering was cut at exactly 30s. Image generation is the everyday
+ * case: `POST /v1/images/generations` sends nothing until the image is done,
+ * which is routinely 30-90s. Ten minutes still reaps a tunnel both ends have
+ * abandoned without killing one that is merely waiting.
+ * `AIPOOL_TUNNEL_IDLE_TIMEOUT_MS` overrides it.
+ */
+export const TUNNEL_IDLE_TIMEOUT_MS = 10 * 60_000;
+
+function resolveTunnelIdleTimeout() {
+  const env = Number(process.env.AIPOOL_TUNNEL_IDLE_TIMEOUT_MS);
+  return env > 0 ? env : TUNNEL_IDLE_TIMEOUT_MS;
+}
+
 /**
  * Build a `connect` event handler implementing the terminating MITM described at
  * the top of this file.
@@ -208,8 +228,10 @@ export function upgradeUpstreamFor(hostHeader, config, upstream) {
  * @param {Object|null} [opts.egress]
  * @param {Object|null} [opts.clientUsage]
  * @param {Object|null} [opts.dimensionUsage]
+ * @param {number} [opts.tunnelConnectTimeoutMs]  bound on a blind tunnel's dial
+ * @param {number} [opts.tunnelIdleTimeoutMs]  bound on an established blind tunnel's silence
  */
-export function createConnectHandler({ config, accountManager, ensureLeaf, logDir = null, hooks = {}, log = () => {}, sx = null, egress = null, clientUsage = null, dimensionUsage = null }) {
+export function createConnectHandler({ config, accountManager, ensureLeaf, logDir = null, hooks = {}, log = () => {}, sx = null, egress = null, clientUsage = null, dimensionUsage = null, tunnelConnectTimeoutMs = TUNNEL_CONNECT_TIMEOUT_MS, tunnelIdleTimeoutMs = resolveTunnelIdleTimeout() }) {
   const upstream = config.upstream || 'https://api.anthropic.com';
   const holdMs = (config.holdSeconds || 0) * 1000;
 
@@ -388,6 +410,9 @@ export function createConnectHandler({ config, accountManager, ensureLeaf, logDi
           return;
         }
         established = true;
+        // Connected: from here the bound is on silence, not on the dial, and a
+        // server thinking over a long request is not a stalled tunnel.
+        up.setTimeout(tunnelIdleTimeoutMs);
         reply200Raw(clientSocket);
         if (head && head.length) up.write(head);
         up.pipe(clientSocket); clientSocket.pipe(up);
@@ -405,7 +430,8 @@ export function createConnectHandler({ config, accountManager, ensureLeaf, logDi
       // dial from the client's view — surface a 502 rather than a silent drop.
       up.on('close', () => teardown('502 Bad Gateway'));
       clientSocket.on('close', () => teardown()); // client gone: nothing to write
-      up.setTimeout(30_000, () => teardown('504 Gateway Timeout')); // bound a stalled connect/idle tunnel
+      // Bounds the dial; re-armed with the idle bound once the tunnel is live.
+      up.setTimeout(tunnelConnectTimeoutMs, () => teardown('504 Gateway Timeout'));
       return;
     }
 
