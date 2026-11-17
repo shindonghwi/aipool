@@ -358,8 +358,9 @@ export async function stopCodexThread(target, { socketPath, timeoutMs = 10_000, 
       const errors = [];
       for (const t of active) {
         try {
+          /** @type {{ status?: { type: string }, turns?: Array<{ id: string, status: string }> }} */
           const full = (await rpc.request('thread/read', { threadId: t.id, includeTurns: true })).thread;
-          const turn = full.turns?.findLast(turn => turn.status === 'inProgress');
+          const turn = full.turns?.slice().reverse().find(turn => turn.status === 'inProgress');
           if (!turn) {
             if (full.status?.type === 'active') throw new Error('active session has no readable running turn');
             continue;
@@ -370,7 +371,7 @@ export async function stopCodexThread(target, { socketPath, timeoutMs = 10_000, 
           interrupted.add(key);
         } catch (error) {
           // One failed interrupt must not leave the remaining builders running.
-          errors.push({ id: t.id, message: error.message });
+          errors.push({ id: t.id, message: error instanceof Error ? error.message : String(error) });
         }
       }
       threads = await snapshot();

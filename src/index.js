@@ -1260,7 +1260,8 @@ async function statusCommand() {
       await refresh.text();
       refreshing = true;
     } catch (err) {
-      console.error(`Could not refresh account quotas (${err?.message || err}); showing last known readings.`);
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`Could not refresh account quotas (${message}); showing last known readings.`);
     }
   }
 
