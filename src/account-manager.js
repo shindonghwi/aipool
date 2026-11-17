@@ -1867,11 +1867,10 @@ export class AccountManager {
 
   /**
    * The operator's answer for `account` — true (spend credits), false (do
-   * not), or null (not asked) — as it stands NOW. An answer is given for one
-   * weekly window: `useCreditsUntil` is that window's reset, and once it passes
-   * the answer lapses and the question is asked again the next time the plan
-   * runs out. A refilled week is free capacity; spending credits through it on
-   * last week's say-so would be the expensive mistake.
+   * not), or null (not asked) — as it stands NOW. The choice stands until
+   * changed, unless an explicit `useCreditsUntil` deadline was saved by an
+   * older version or set in config. A refilled plan is always used before
+   * credits, independently of how long the choice stands.
    * @param {Record<string, any>} account
    * @param {number} [now]
    * @returns {boolean|null}
@@ -1936,7 +1935,7 @@ export class AccountManager {
    *    left of its window is quota already paid for; the threshold exists to
    *    move traffic somewhere better first, and there is nowhere better.
    *  - `credits`: an account whose plan is spent, holding credits the operator
-   *    said may be spent this week.
+   *    has allowed it to spend.
    *
    * Lowest priority value wins within each. Null when neither exists.
    * @param {Set<number>|null} [exclude]
@@ -1995,7 +1994,7 @@ export class AccountManager {
   /**
    * Should the operator be asked whether `account` may run on credits: its
    * plan is spent, it holds credits upstream would bill, nobody has answered
-   * for this week, and nothing cheaper can take Codex traffic instead.
+   * yet, and nothing cheaper can take Codex traffic instead.
    * @param {Record<string, any>} account
    */
   creditsQuestionPending(account) {

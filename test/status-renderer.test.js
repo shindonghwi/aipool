@@ -35,6 +35,17 @@ test('renderStatus prints core status', () => {
   assert.match(output, /2 req, 1.5k tok/);
 });
 
+test('on-demand refresh results stay visible when the background schedule is off', () => {
+  const status = sampleStatus();
+  status.probe.enabled = false;
+  const output = renderStatus(status, { color: false, now });
+  assert.match(output, /background off, last refresh 2m ago/);
+  assert.match(output, /Probe\s+ok 2m ago/);
+  status.probe.accounts[0].status = 'error';
+  status.probe.accounts[0].error = 'HTTP 429';
+  assert.match(renderStatus(status, { color: false, now }), /Probe\s+error 2m ago, 42ms, HTTP 429/);
+});
+
 test('renderStatus shows an OAuth entitlement cooldown separately from account status', () => {
   const status = sampleStatus();
   status.accounts[0].entitlementDeniedUntil = new Date(now + 4 * 60_000).toISOString();

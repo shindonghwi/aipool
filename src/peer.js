@@ -42,6 +42,7 @@ const USAGE = [
   '       aipool peer send <session> <message|->   deliver a message (- reads stdin)',
   '            [--wait [--timeout <secs>]]         to Codex: also wait for and print its reply',
   '            [--from <name>]                     sender name, when it cannot be worked out',
+  '       aipool peer stop <Codex session>         interrupt it and all loaded descendants',
   '       aipool peer read [<session>]             unread messages for a Claude session',
   '       aipool peer wait [<session>] [--timeout <secs>]',
   '       aipool peer whoami                       the session running this shell',
@@ -311,6 +312,73 @@ export async function codexThreads(opts) {
     if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') return null;
     throw err;
   }
+}
+
+/**
+ * Cancel a Codex task's running turns, including descendants left running
+ * after their parent was interrupted. A queued message is never a cancel.
+ * Resolve only loaded Codex threads and use recorded parent ids, not folders,
+ * so another task in the same checkout cannot be stopped accidentally.
+ * @param {string} target exact thread id or name
+ * @param {{ socketPath?: string, timeoutMs?: number, pollMs?: number }} [opts]
+ */
+export async function stopCodexThread(target, { socketPath, timeoutMs = 10_000, pollMs = 100 } = {}) {
+  return withCodexDaemon(async rpc => {
+    const snapshot = async () => {
+      const ids = (await rpc.request('thread/loaded/list'))?.data || [];
+      const threads = [];
+      for (const id of ids) threads.push((await rpc.request('thread/read', { threadId: id })).thread);
+      return threads;
+    };
+    let threads = await snapshot();
+    const matches = threads.filter(t => t.id === target || (t.name && t.name === target));
+    if (matches.length !== 1) throw new Error(matches.length
+      ? `more than one Codex session named ${target}; use its thread id`
+      : `no loaded Codex session called ${target} (see: aipool peer list)`);
+    const root = matches[0];
+    const family = new Set([root.id]);
+    const interrupted = new Set();
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      // Repeat to include grandchildren even when the list is child-first.
+      for (let changed = true; changed;) {
+        changed = false;
+        for (const t of threads) {
+          const parent = t.source?.subAgent?.thread_spawn?.parent_thread_id;
+          if (family.has(parent) && !family.has(t.id)) { family.add(t.id); changed = true; }
+        }
+      }
+      const active = threads.filter(t => family.has(t.id) && t.status?.type === 'active');
+      if (!active.length) return { id: root.id, name: root.name || root.id, interrupted: interrupted.size, threads: family.size };
+      if (Date.now() >= deadline) throw new Error(`stop timed out; still active: ${active.map(t => t.id).join(', ')}`);
+      // Stop the parent first so it cannot schedule more builders while its
+      // existing builders are being cancelled. Re-scan after every pass to
+      // catch children spawned just before the parent's interrupt landed.
+      active.sort((a, b) => Number(b.id === root.id) - Number(a.id === root.id));
+      const errors = [];
+      for (const t of active) {
+        try {
+          const full = (await rpc.request('thread/read', { threadId: t.id, includeTurns: true })).thread;
+          const turn = full.turns?.findLast(turn => turn.status === 'inProgress');
+          if (!turn) {
+            if (full.status?.type === 'active') throw new Error('active session has no readable running turn');
+            continue;
+          }
+          const key = `${t.id}:${turn.id}`;
+          if (interrupted.has(key)) continue;
+          await rpc.request('turn/interrupt', { threadId: t.id, turnId: turn.id });
+          interrupted.add(key);
+        } catch (error) {
+          // One failed interrupt must not leave the remaining builders running.
+          errors.push({ id: t.id, message: error.message });
+        }
+      }
+      threads = await snapshot();
+      const failed = errors.filter(e => threads.some(t => t.id === e.id && t.status?.type === 'active'));
+      if (failed.length) throw new Error(`could not stop ${failed.map(e => `${e.id}: ${e.message}`).join('; ')}`);
+      await new Promise(resolve => setTimeout(resolve, pollMs));
+    }
+  }, { socketPath });
 }
 
 /** A session's rollout file, for a thread the daemon did not report a path for. */
@@ -732,6 +800,7 @@ export function agentNote(ref = cliRef()) {
     `- \`${ref} peer list\`: the open sessions and their folders. Claude sessions go by name, Codex sessions by thread id (or name).`,
     `- \`${ref} peer send --wait <codex session> "question"\`: asks a Codex session and prints its answer. For work that takes long, leave out \`--wait\`; the answer comes back later as a message.`,
     `- \`${ref} peer send <session> "message"\`: a Codex session gets it as its next turn; a Claude session is woken with it.`,
+    `- \`${ref} peer stop <codex session>\`: actually interrupts the session and its running descendants. When the user asks to stop Codex work, use this instead of sending a stop message, which only queues another turn.`,
     '',
     'When the user does not say which session, take the one working in the same folder as you; when there are several or none, ask.',
     '',
@@ -868,6 +937,12 @@ export async function peerCommand(argv) {
         const ended = await sweepWaiters();
         if (!ended.length) console.log('No orphaned waiters.');
         for (const w of ended) console.log(`Ended waiter ${w.pid} for ${w.sessionId}: ${w.reason}`);
+        return 0;
+      }
+      case 'stop': {
+        if (args.length !== 1) { console.error(USAGE); return 2; }
+        const result = await stopCodexThread(args[0]);
+        console.log(`Stopped Codex session ${result.name}: interrupted ${result.interrupted} running turn(s); no active turns remain in its ${result.threads} loaded session(s).`);
         return 0;
       }
       case 'whoami': {

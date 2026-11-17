@@ -224,6 +224,9 @@ export function renderStatusCompact(status, { color = process.stdout.isTTY, now 
     const shown = nameText(account.name).padEnd(nameWidth);
     const name = off ? paint.gray(shown) : paint.bold(shown);
     lines.push(`${dot} ${name}  ${tint(row.state)}`);
+    const check = (status.probe?.accounts || []).find((/** @type {any} */ r) => r?.name === account.name);
+    const checkedAt = check?.status === 'ok' ? parseTs(check.lastProbedAt) : null;
+    if (checkedAt) lines.push(`    ${paint.dim('Updated'.padEnd(7))} ${paint.dim(formatAgo(checkedAt, now))}`);
 
     const q = account.quota || {};
     // An account without the unified windows carries its own figure in the
@@ -290,7 +293,7 @@ export function renderStatusCompact(status, { color = process.stdout.isTTY, now 
         ? `${who}: ${paint.red(`⚠ billing real money — ${formatMoney(spend)} used this month`)}`
         : `${who}: ${paint.yellow(`⚠ can bill real money past its plan (${formatMoney(spend)} used)`)}`);
     }
-    const probeRow = status.probe?.enabled && (status.probe.accounts || []).find((/** @type {any} */ r) => r?.name === account.name);
+    const probeRow = (status.probe?.accounts || []).find((/** @type {any} */ r) => r?.name === account.name);
     if (probeRow && !['ok', 'running', 'never', 'not-applicable'].includes(probeRow.status)) {
       attention.push(`${who}: ${paint.yellow('quota figures are not refreshing')}${probeRow.error ? paint.dim(` (${safeLine(probeRow.error, 60)})`) : ''}`);
     }
@@ -1068,7 +1071,11 @@ function gradientColor(index, width) {
 }
 
 function formatProbeSummary(probe, now, paint) {
-  if (!probe.enabled) return paint.gray('off (passive only)');
+  if (!probe.enabled) {
+    const last = parseTs(probe.lastRunFinishedAt);
+    return paint.gray(probe.running ? 'on-demand refresh running'
+      : last ? `background off, last refresh ${formatAgo(last, now)}` : 'off (passive only)');
+  }
   let bits;
   if (probe.mode === 'reset') {
     bits = [`daily ${probe.warmupTime} ${probe.timezone} → reset ${probe.resetTime}`];
@@ -1087,7 +1094,7 @@ function formatProbeSummary(probe, now, paint) {
 
 function formatAccountProbe(accountName, probe, now, paint) {
   const row = (probe.accounts || []).find(account => account.name === accountName);
-  if (!probe.enabled) return paint.gray('off');
+  if (!probe.enabled && (!row || row.status === 'never')) return paint.gray('off');
   if (!row) return paint.gray('never');
   if (row.status === 'not-applicable') return paint.gray('not applicable');
   const status = row.status === 'ok'

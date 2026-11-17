@@ -96,9 +96,9 @@ const CREDITS_USAGE = [
   '       aipool credits on  [account]      (keep serving on purchased credits once the plan is spent)',
   '       aipool credits off [account]      (stop when the plan is spent)',
   '',
-  'Without an account name, applies to every Codex account. An answer holds until',
-  'the account\'s weekly limit resets; the next time its plan runs out, you are',
-  'asked again. Free limit resets are only reported; aipool never redeems them.',
+  'Without an account name, applies to every Codex account. The setting stays',
+  'until you change it, including across weekly resets and server restarts.',
+  'Free limit resets are only reported; aipool never redeems them.',
 ].join('\n');
 
 const DISTRIBUTE_USAGE = 'Usage: aipool distribute <on|off|adaptive>';
@@ -1234,6 +1234,8 @@ async function statusCommand() {
   const config = await loadOrCreateConfig();
   const url = `http://localhost:${config.proxy.port}/aipool/status`;
   const json = args.includes('--json');
+  const cached = args.includes('--cached');
+  const headers = { 'x-api-key': config.proxy.apiKey };
   const colorArg = argValue('--color') || args.find(arg => arg.startsWith('--color='))?.slice('--color='.length);
   const color = colorArg === 'always'
     || (colorArg !== 'never' && process.stdout.isTTY);
@@ -1243,13 +1245,42 @@ async function statusCommand() {
   // stopped one — and without a deadline this command would just hang on it.
   const configuredTimeout = Number(process.env.AIPOOL_STATUS_TIMEOUT_MS);
   const timeoutMs = configuredTimeout > 0 ? configuredTimeout : 5_000;
+  // Usage reads can take longer than the local status snapshot, especially
+  // when they have to renew an OAuth token. They never send inference traffic.
+  const refreshTimeoutMs = configuredTimeout > 0 ? configuredTimeout : 35_000;
+  const refreshDeadline = Date.now() + refreshTimeoutMs;
+  let refreshing = false;
+  if (!cached) {
+    try {
+      const refresh = await fetch(`http://localhost:${config.proxy.port}/aipool/probe`, {
+        method: 'POST', headers,
+        signal: AbortSignal.timeout(refreshTimeoutMs),
+      });
+      if (!refresh.ok) throw new Error(`HTTP ${refresh.status}`);
+      await refresh.text();
+      refreshing = true;
+    } catch (err) {
+      console.error(`Could not refresh account quotas (${err?.message || err}); showing last known readings.`);
+    }
+  }
 
   try {
-    const res = await fetch(url, {
-      headers: { 'x-api-key': config.proxy.apiKey },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    const data = await res.json();
+    const readStatus = async () => {
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    };
+    let data = await readStatus();
+    // The server may already be probing for another caller. Older servers
+    // acknowledge that request immediately; wait for its results as well.
+    while (refreshing && data.probe?.running) {
+      if (Date.now() >= refreshDeadline) {
+        console.error('Quota refresh is still running; showing last known readings.');
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+      data = await readStatus();
+    }
     if (json) {
       await writeStdout(`${JSON.stringify(data, null, 2)}\n`);
       return;
@@ -2256,24 +2287,18 @@ async function creditsCommand() {
     process.exit(1);
   }
 
-  // An answer holds for the account's current weekly window. Its reset is
-  // known only to the running server; without one the answer stands until
-  // changed by hand, and the operator is told so.
-  const live = await liveAccountRows(config);
+  // An explicit choice stands until changed. Expiring it at a weekly reset
+  // silently stops the next conversation that needs credits. Clear any
+  // deadline left by an older version of this command.
   for (const account of targets) {
     account.useCredits = sub === 'on';
-    const reset = Number(live.get(account.name)?.quota?.unified7dReset);
-    if (Number.isFinite(reset) && reset > Date.now()) account.useCreditsUntil = reset;
-    else delete account.useCreditsUntil;
+    delete account.useCreditsUntil;
   }
   await saveConfig(config);
   for (const account of targets) {
-    const scope = account.useCreditsUntil
-      ? `until its weekly limit resets (${untilText(account.useCreditsUntil)}); you will be asked again after that`
-      : 'until you change it (weekly reset not known — is the server running?)';
     console.log(sub === 'on'
-      ? `"${account.name}" serves on purchased credits once its plan is spent, ${scope}.`
-      : `"${account.name}" stops when its plan is spent, ${scope}.`);
+      ? `"${account.name}" automatically serves on purchased credits once its plan is spent, until you run aipool credits off.`
+      : `"${account.name}" stops when its plan is spent, until you run aipool credits on.`);
   }
   await notifyRunningServer(config);
 }
@@ -2342,8 +2367,9 @@ Commands:
                       (LaunchAgent on macOS, systemd --user unit on Linux;
                       'print' writes the unit to stdout without touching anything)
   restart             Restart the installed service (same as 'service restart')
-  status [-v|--json]  Show live proxy status: one row per account; -v for the
-                      full per-account breakdown, --json for scripts
+  status [-v|--json]  Refresh account quotas and show status; --cached skips
+                      upstream reads. -v shows the full per-account breakdown;
+                      --json prints the same data for scripts
                       Use --color=always|never to control ANSI colors
   attach              Open the live dashboard against a running server; s
                       switches account, R reloads config, q leaves it running

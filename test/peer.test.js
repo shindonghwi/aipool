@@ -15,6 +15,7 @@ import {
   hasWaiter,
   postToMailbox,
   resolveTarget,
+  stopCodexThread,
   rewake,
   rewakeCommand,
   shellWord,
@@ -147,6 +148,8 @@ test('the hook goes under SessionStart and Stop, once, beside hooks already ther
 test('the agents note goes in once, replaces an older one, and comes out cleanly', () => {
   const note = agentNote('aipool');
   assert.match(note, /aipool peer send <session> "message"/);
+  assert.match(note, /aipool peer stop <codex session>/);
+  assert.match(note, /instead of sending a stop message/);
   assert.equal(withAgentNote('', note), `${note}\n`);
   const mine = '# My notes\n\nkeep this\n';
   const added = withAgentNote(mine, note);
@@ -290,7 +293,7 @@ test('a sweep ends a real stale waiter and leaves the current one', async () => 
 // A stand-in for the Codex daemon's control socket: the WebSocket handshake,
 // then JSON-RPC answers sent the awkward ways a server may send them — a large
 // frame and a message split over continuation frames.
-function fakeDaemon(socketPath, threads) {
+function fakeDaemon(socketPath, threads, onRequest = () => {}) {
   const frame = (data, op, fin = true) => {
     const n = data.length;
     const head = n < 126 ? Buffer.from([(fin ? 0x80 : 0) | op, n])
@@ -325,9 +328,16 @@ function fakeDaemon(socketPath, threads) {
         const msg = JSON.parse(Buffer.from(data).toString());
         if (msg.id === undefined) continue;
         let result = {};
-        if (msg.method === 'thread/loaded/list') result = { data: threads.map(t => t.id) };
-        if (msg.method === 'thread/read') result = { thread: { ...threads.find(t => t.id === msg.params.threadId), turns: 'x'.repeat(70_000) } };
-        const out = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }));
+        let error;
+        try {
+          onRequest(msg);
+          if (msg.method === 'thread/loaded/list') result = { data: threads.map(t => t.id) };
+          if (msg.method === 'thread/read') {
+            const thread = threads.find(t => t.id === msg.params.threadId);
+            result = { thread: { ...thread, turns: thread?.turns ?? 'x'.repeat(70_000) } };
+          }
+        } catch (err) { error = { message: err.message }; }
+        const out = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: msg.id, ...(error ? { error } : { result }) }));
         sock.write(frame(Buffer.alloc(0), 9)); // a ping, which the client answers
         if (msg.method === 'thread/loaded/list') {
           const cut = Math.floor(out.length / 2);
@@ -359,6 +369,105 @@ test('the Codex daemon is read over its WebSocket control socket', async () => {
     } finally { server.close(); }
     assert.equal(await codexThreads({ socketPath: join(s.dir, 'none.sock') }), null, 'no daemon, no list');
   } finally { s.done(); }
+});
+
+function stopThread(id, parent = null, active = true) {
+  return {
+    id, name: id, cwd: '/same-checkout', status: { type: active ? 'active' : 'idle' },
+    source: parent ? { subAgent: { thread_spawn: { parent_thread_id: parent } } } : 'vscode',
+    turns: [{ id: `turn-${id}`, status: active ? 'inProgress' : 'completed' }],
+  };
+}
+
+function finishInterrupt(threads, msg) {
+  if (msg.method !== 'turn/interrupt') return;
+  const thread = threads.find(t => t.id === msg.params.threadId);
+  assert.equal(msg.params.turnId, thread.turns[0].id);
+  thread.status.type = 'idle';
+  thread.turns[0].status = 'interrupted';
+}
+
+test('stop interrupts descendants of an idle parent, including grandchildren, without touching a sibling task', async () => {
+  const s = scratch();
+  const threads = [stopThread('grandchild', 'builder'), stopThread('root', null, false), stopThread('builder', 'root'), stopThread('other')];
+  const calls = [];
+  const socketPath = join(s.dir, 'd.sock');
+  const server = await fakeDaemon(socketPath, threads, msg => {
+    calls.push(msg.method);
+    finishInterrupt(threads, msg);
+  });
+  try {
+    const result = await stopCodexThread('root', { socketPath, pollMs: 0 });
+    assert.equal(result.interrupted, 2);
+    assert.equal(result.threads, 3);
+    assert.equal(threads.find(t => t.id === 'other').status.type, 'active');
+    assert.equal(threads.find(t => t.id === 'builder').status.type, 'idle');
+    assert.equal(threads.find(t => t.id === 'grandchild').status.type, 'idle');
+    assert.ok(calls.includes('turn/interrupt'));
+    assert.ok(!calls.includes('turn/start'), 'stopping never starts another turn');
+  } finally { server.close(); s.done(); }
+});
+
+test('stop interrupts the parent first and finds a child spawned during cancellation', async () => {
+  const s = scratch();
+  const threads = [stopThread('builder', 'root'), stopThread('root')];
+  const stopped = [];
+  const socketPath = join(s.dir, 'd.sock');
+  const server = await fakeDaemon(socketPath, threads, msg => {
+    if (msg.method === 'turn/interrupt') {
+      stopped.push(msg.params.threadId);
+      if (msg.params.threadId === 'root') threads.push(stopThread('late-builder', 'root'));
+      finishInterrupt(threads, msg);
+    }
+  });
+  try {
+    const result = await stopCodexThread('root', { socketPath, pollMs: 0 });
+    assert.deepEqual(stopped, ['root', 'builder', 'late-builder']);
+    assert.equal(result.interrupted, 3);
+    assert.equal(result.threads, 3);
+    assert.ok(threads.every(t => t.status.type === 'idle'));
+  } finally { server.close(); s.done(); }
+});
+
+test('a failed builder interrupt does not prevent cancelling the remaining builders or report success', async () => {
+  const s = scratch();
+  const threads = [stopThread('root', null, false), stopThread('failed', 'root'), stopThread('builder', 'root')];
+  const socketPath = join(s.dir, 'd.sock');
+  const server = await fakeDaemon(socketPath, threads, msg => {
+    if (msg.method === 'turn/interrupt' && msg.params.threadId === 'failed') throw new Error('cancel refused');
+    finishInterrupt(threads, msg);
+  });
+  try {
+    await assert.rejects(stopCodexThread('root', { socketPath, pollMs: 0 }), /could not stop failed: .*cancel refused/);
+    assert.equal(threads.find(t => t.id === 'builder').status.type, 'idle');
+    assert.equal(threads.find(t => t.id === 'failed').status.type, 'active');
+  } finally { server.close(); s.done(); }
+});
+
+test('stop rejects missing or ambiguous names without interrupting anything', async () => {
+  const s = scratch();
+  const threads = [stopThread('a'), stopThread('b')];
+  threads.forEach(t => { t.name = 'duplicate'; });
+  const socketPath = join(s.dir, 'd.sock');
+  let interrupts = 0;
+  const server = await fakeDaemon(socketPath, threads, msg => { if (msg.method === 'turn/interrupt') interrupts++; });
+  try {
+    await assert.rejects(stopCodexThread('missing', { socketPath }), /no loaded Codex session/);
+    await assert.rejects(stopCodexThread('duplicate', { socketPath }), /more than one Codex session/);
+    assert.equal(interrupts, 0);
+  } finally { server.close(); s.done(); }
+});
+
+test('stop waits for idle confirmation and fails when cancellation never settles', async () => {
+  const s = scratch();
+  const threads = [stopThread('root')];
+  const socketPath = join(s.dir, 'd.sock');
+  let interrupts = 0;
+  const server = await fakeDaemon(socketPath, threads, msg => { if (msg.method === 'turn/interrupt') interrupts++; });
+  try {
+    await assert.rejects(stopCodexThread('root', { socketPath, timeoutMs: 50, pollMs: 5 }), /stop timed out; still active: root/);
+    assert.equal(interrupts, 1, 'send one cancel per running turn while waiting for its status');
+  } finally { server.close(); s.done(); }
 });
 
 test('the hook runs peer-hook.js, and install recognises it to replace or remove', () => {

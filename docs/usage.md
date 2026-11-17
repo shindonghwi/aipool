@@ -163,6 +163,7 @@ aipool peer install                         # 한 번만: Claude 세션을 깨�
 aipool peer list                            # 열려 있는 Claude 세션과 Codex 세션
 aipool peer send <세션> "메시지"             # 보내기 (- 를 주면 stdin에서 읽음)
 aipool peer send --wait <Codex 세션> "질문"  # Codex의 답이 올 때까지 기다렸다가 출력
+aipool peer stop <Codex 세션>                # 본체와 하위 에이전트의 실행 중인 턴 중단
 aipool peer read                            # 이 Claude 세션에 온 메시지 읽기 (wait는 올 때까지 대기)
 aipool peer name <스레드 id> <이름>          # Codex 세션에 이름 붙이기
 aipool peer uninstall                       # 훅과 안내 제거
@@ -175,6 +176,8 @@ aipool peer sweep                           # 할 일이 없어진 대기 프로
 - **Claude 세션으로:** Claude Code에는 밖에서 메시지를 넣는 입구가 없어서, 그 세션의 우편함(`~/.config/aipool-peer/inbox/`)에 넣습니다. `aipool peer install`이 `~/.claude/settings.json`에 넣는 asyncRewake 훅(SessionStart, Stop)이 우편함을 1초마다 확인하다가, 메시지가 오면 쉬고 있던 세션도 깨워 그 메시지를 전달합니다. 훅은 Claude 세션이 시작될 때와 턴이 끝날 때마다 다시 걸리며, 세션마다 하나만 돕니다. 훅이 없으면 받는 쪽이 `aipool peer read`로 읽어야 합니다.
 
 백그라운드 세션(`claude --bg`)도 같은 방식으로 받습니다. 훅을 설치하기 전에 시작했거나 대기 프로세스가 없는 세션은 현재 또는 다음 턴이 끝날 때 메시지를 받습니다.
+
+**Codex 작업을 중단하려면 `aipool peer stop "세션 이름"`을 사용하세요.** `peer send`로 보낸 “중단해”는 다음 입력으로 대기하므로 실행 취소를 보장하지 않습니다. `stop`은 데몬에 `turn/interrupt`를 보내고, 본체가 이미 쉬고 있어도 실행 중인 하위 에이전트를 부모 스레드 ID로 찾아 함께 중단합니다. 같은 폴더의 별도 세션은 건드리지 않으며, 대상 작업 트리에 활성 세션이 없는지 확인한 뒤 성공을 출력합니다. 이미 분리 실행한 외부 프로세스나 이후 새로 들어오는 작업 요청까지 차단하는 기능은 아닙니다. Claude 세션은 이 명령의 대상이 아닙니다.
 
 세션은 `aipool peer list`에 나오는 이름이나 id로 지정합니다. Claude 세션은 이름(`aipool-95` 같은), 세션 id, pid로, Codex 세션은 스레드 id나 이름으로 지정할 수 있습니다. 보내는 쪽이 누구인지는 자동으로 알아냅니다. Codex는 실행하는 명령에 `CODEX_THREAD_ID`를 넘겨 주고, Claude 세션은 셸의 상위 프로세스로 찾습니다. 어느 쪽도 아니면 `--from <이름>`이나 `AIPOOL_PEER_NAME`으로 지정합니다.
 
@@ -215,6 +218,7 @@ aipool warmup reset 15:30 --timezone Europe/Moscow
 aipool warmup rolling 15:30 --timezone Europe/Moscow
                              # 리셋 기준을 15:30에 맞추고 이후 5시간마다 이어감
 aipool peer send <세션> "..."  # Claude·Codex 세션 사이 메시지(list/read/wait/install)
+aipool peer stop <Codex 세션>  # 본체와 하위 에이전트의 실행 중인 턴 중단
 aipool api <path>        # 계정 자격 증명으로 API 엔드포인트 호출
 aipool update            # 현재 버전 표시 (git 체크아웃은 git pull로 갱신)
 aipool version           # 설치된 버전 출력
@@ -222,6 +226,8 @@ aipool help              # 전체 명령어 표시
 ```
 
 `aipool status`는 계정 풀 상태를 사람이 읽기 좋은 텍스트로 한 번 출력합니다. 헤더는 작업을 계속할 수 있는지를 알려 줍니다. 지금 사용 가능한 계정 수(하나도 없으면 첫 계정이 언제 돌아오는지)와 활성 세션 수를 보여 주고, **Fleet weekly** 막대는 활성화된 계정들의 주간 창이 평균적으로 얼마나 찼는지 나타냅니다. 그 아래에는 계정별 카드가 가장 유용한 순서(사용 중, 준비됨, 소진됨(가장 빨리 돌아오는 계정부터), 고장, 비활성화)로 나옵니다. 각 카드에는 점과 **상태**(`in use · N active`, `ready`, `limit reached · back in 2d4h`, `rate limited · back in 3m`, `error`, `disabled`)가 표시되고, 이어서 쿼터 창마다 막대가 하나씩 사용률 및 리셋 시점과 함께 표시됩니다. 백분율은 여유가 있으면 녹색, 70%부터는 노란색, 계정의 전환 임계값(또는 막대에 표시되는 `maxUsage` 상한)에 도달하면 빨간색입니다. **Needs attention**은 주의가 필요한 항목이 있을 때만 나타납니다. 고장 난 계정, 초과 사용 과금, 갱신이 멈춘 쿼터 수치, 차단된 모델 등이 이에 해당합니다. 로테이션 설정(전환 임계값, 분산 모드)과 TUI가 보여 주는 계정별 상세 내역(모델별 사용 가능 여부, 사용량, 프로브 및 적응형 분산 상세, 클라이언트별 사용량)은 `aipool status -v`에서 볼 수 있습니다. SSH나 스크립트에서 쓰기 편리하며, 기계가 읽을 수 있는 출력이 필요하면 `--json`을 사용합니다. JSON의 `server.version`은 응답하는 프로세스의 버전으로, 시작할 때 한 번만 읽습니다. 따라서 `aipool update` 직후에는 재시작하기 전까지 여전히 이전 코드의 버전이 표시되지만, 설치된 CLI의 `aipool version`은 이미 새 버전을 표시합니다.
+
+`status`는 출력 전에 계정별 사용량을 조회하며, 갱신된 계정에는 `Updated` 시각을 표시합니다. 조회가 실패하면 마지막 값을 유지하고 실패 원인을 알립니다. 백그라운드 프로브가 꺼져 있어도 동작합니다. 반복 호출하는 스크립트에서는 `aipool status --cached --json`으로 조회를 생략하고 저장된 값을 읽을 수 있습니다. Antigravity는 해당 CLI의 마지막 관측값을 표시합니다.
 
 `aipool attach`는 이미 실행 중인 서버에 연결해 터미널 대시보드 자체를 엽니다. 프록시가 백그라운드 서비스로 실행될 때 대화형 조작을 되찾는 방법입니다. 같은 상태 엔드포인트를 1초마다 폴링하며, 원격 제어가 제공하는 두 가지 작업을 할 수 있습니다. `s`는 계정을 전환하고, `R`은 설정을 다시 불러옵니다. 브라우저 대시보드에는 이에 대응하는 **Reload config** 동작과 쿼터를 쓰지 않는 **Probe quotas** 동작이 추가로 있습니다. 설정 편집과 요청 활동 스트림은 서버 프로세스만 가진 상태가 필요하므로 여전히 서버 자체의 TUI에만 있습니다. 서버와의 연결이 끊기면 헤더 표시가 `▲`에서 `▼`로 바뀌며, 화면에 보이는 내용은 현재 상태가 아니라 마지막 스냅샷입니다.
 

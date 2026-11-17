@@ -150,7 +150,7 @@ test('the rest of a plan stays Codex-only: a Claude fleet past its threshold sti
   assert.equal(am.getActiveAccount(null, 'claude-opus-5-5'), null);
 });
 
-// ── an answer holds for one week ────────────────────────────────────────────
+// ── persistent choices and legacy weekly deadlines ─────────────────────────
 
 test('an answer lapses at the weekly reset it was given for, and the question returns', () => {
   const am = new AccountManager([codex('c', { useCredits: true, useCreditsUntil: Date.now() - 1 })], 0.98);

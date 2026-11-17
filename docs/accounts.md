@@ -171,11 +171,11 @@ ChatGPT는 플랜의 사용 한도를 다 쓴 뒤에도 **구매 크레딧**이 
 - 잔액은 Codex 응답 헤더(`x-codex-credits-has-credits`, `x-codex-credits-balance`, `x-codex-credits-unlimited`)와 `/wham/usage` 페이로드의 `credits`에서 읽습니다.
 - 모든 Codex 계정이 전환 임계값(`switchThreshold`, 기본 98%)을 넘으면, 플랜이 아직 남은 계정이 100%까지 계속 처리합니다. 남은 플랜은 이미 낸 몫이기 때문입니다. 이때 상태는 `using the rest of its plan`입니다.
 - 플랜을 100% 다 썼고 크레딧이 남아 있으면 `aipool status`의 **Needs attention**과 Codex가 받는 429 메시지에 질문이 나옵니다. 무료 리셋 크레딧을 보유하고 있으면 같은 줄에 함께 알려 줍니다. 답을 받기 전에는 쿼터 확인용 요청도 보내지 않습니다. 그 요청도 크레딧으로 청구되기 때문입니다.
-- `aipool credits on`이라고 답하면 플랜을 다 쓴 뒤 크레딧으로 계속 처리합니다. 플랜이 남은 Codex 계정이 있으면 그 계정을 먼저 쓰고, 크레딧은 마지막에 씁니다. 크레딧을 쓰는 동안 상태는 `on credits · 59,934 left`로 표시되고 **Needs attention**에 경고가 남습니다.
+- `aipool credits on`을 한 번 실행하면 플랜을 다 쓴 뒤 구매 크레딧으로 자동 전환해 계속 처리합니다. 플랜이 남은 Codex 계정이 있으면 그 계정을 먼저 쓰고, 크레딧은 마지막에 씁니다. 크레딧을 쓰는 동안 상태는 `on credits · 59,934 left`로 표시되고 **Needs attention**에 경고가 남습니다.
 - `aipool credits off`라고 답하면 플랜을 다 쓴 시점에서 멈춥니다.
-- 답은 그 계정의 **주간 한도가 초기화될 때까지만** 유효합니다. 초기화되면 답이 사라지고, 다음에 플랜을 다 쓰면 다시 묻습니다. 초기화된 주에는 플랜으로만 처리하며 크레딧을 쓰지 않습니다.
+- 설정은 **직접 바꿀 때까지 유지**됩니다. 주간 한도가 초기화되거나 서버가 재시작되어도 다시 묻지 않습니다. 한도가 초기화되면 플랜을 먼저 쓰고, 다시 소진되면 크레딧으로 자동 전환합니다. `aipool credits off`로 끌 수 있습니다.
 - `aipool status`의 Codex 계정 카드에는 크레딧이 있으면 항상 `Credits 59,934 left · not asked yet` 줄이 붙습니다. 뒤의 값은 `not asked yet`, `on`, `off`, `spending now`, `spend limit reached` 중 하나입니다. `aipool credits`만 실행하면 계정별 설정, 유효 기간, 잔액을 보여 줍니다.
-- 계정 이름을 생략하면 모든 Codex 계정에 적용됩니다. 답은 설정 파일의 `accounts[].useCredits`(`true`/`false`, 없으면 아직 묻지 않음)와 `accounts[].useCreditsUntil`(답이 끝나는 주간 리셋 시각, ms)에 저장됩니다. 서버가 꺼져 있어 리셋 시각을 모르면 `useCreditsUntil` 없이 저장되고, 그 답은 직접 바꿀 때까지 유지됩니다.
+- 계정 이름을 생략하면 모든 Codex 계정에 적용됩니다. 설정 파일의 `accounts[].useCredits`(`true`/`false`, 없으면 아직 묻지 않음)에 저장됩니다. 이전 버전이 저장한 `accounts[].useCreditsUntil` 만료 시각은 계속 적용되지만, `aipool credits on` 또는 `off`를 다시 실행하면 만료 시각을 지우고 선택을 유지합니다.
 - `maxUsage` 상한, 업스트림 429, 계정 소유자가 건 지출 한도(`overage_limit_reached`)는 크레딧이 있어도 그대로 지킵니다.
 
 ### 예정보다 이른 초기화

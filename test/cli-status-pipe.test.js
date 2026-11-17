@@ -35,15 +35,22 @@ function bigStatus() {
   };
 }
 
-async function fakeControlPlane(status) {
+async function fakeControlPlane(status, { onProbe = () => {}, onStatus = () => {}, probeStatus = 200 } = {}) {
   const seen = [];
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     seen.push({ method: req.method, url: req.url, key: req.headers['x-api-key'] });
+    if (req.method === 'POST' && req.url === '/aipool/probe') {
+      await onProbe();
+      res.writeHead(probeStatus, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: probeStatus === 200 }));
+      return;
+    }
     if (req.method !== 'GET' || req.url !== '/aipool/status') {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end('{"error":"not found"}');
       return;
     }
+    onStatus();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(status));
   });
@@ -92,11 +99,88 @@ test('status --json through a pipe delivers the whole payload before exiting', a
   try {
     const res = await runCli(config.path, ['status', '--json']);
     assert.equal(res.code, 0, res.stderr);
-    assert.deepEqual(fake.seen, [{ method: 'GET', url: '/aipool/status', key: 'tc-test' }]);
+    assert.deepEqual(fake.seen, [
+      { method: 'POST', url: '/aipool/probe', key: 'tc-test' },
+      { method: 'GET', url: '/aipool/status', key: 'tc-test' },
+    ]);
     assert.equal(res.stdout.length, expected.length + 1, `got ${res.stdout.length} of ${expected.length + 1} bytes`);
     assert.deepEqual(JSON.parse(res.stdout), status);
   } finally {
     await fake.close();
     await rm(config.dir, { recursive: true, force: true });
   }
+});
+
+async function withStatus(fn, options = {}) {
+  const status = bigStatus();
+  status.accounts = status.accounts.slice(0, 1);
+  const fake = await fakeControlPlane(status, options);
+  const config = await writeConfig(fake.port);
+  try { await fn({ status, fake, config }); }
+  finally { await fake.close(); await rm(config.dir, { recursive: true, force: true }); }
+}
+
+test('status waits for account refresh before rendering the new quota', async () => {
+  let status;
+  await withStatus(async fixture => {
+    status = fixture.status;
+    const result = await runCli(fixture.config.path, ['status']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stderr, '');
+    assert.match(result.stdout, /73%/);
+    assert.doesNotMatch(result.stdout, /20%/);
+    assert.match(result.stdout, /Updated/);
+  }, { onProbe: async () => {
+    await new Promise(resolve => setTimeout(resolve, 30));
+    status.accounts[0].quota.unified7d = 0.73;
+    status.probe.accounts = [{ name: status.accounts[0].name, status: 'ok', lastProbedAt: new Date().toISOString() }];
+  } });
+});
+
+test('status --cached --json reads the snapshot without any upstream refresh', async () => {
+  await withStatus(async ({ status, fake, config }) => {
+    const result = await runCli(config.path, ['status', '--cached', '--json']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), status);
+    assert.deepEqual(fake.seen, [{ method: 'GET', url: '/aipool/status', key: 'tc-test' }]);
+  });
+});
+
+test('an unsupported refresh still prints the snapshot with an explicit warning', async () => {
+  await withStatus(async ({ status, config }) => {
+    const result = await runCli(config.path, ['status', '--json']);
+    assert.equal(result.code, 0);
+    assert.deepEqual(JSON.parse(result.stdout), status, 'warnings must not corrupt JSON output');
+    assert.match(result.stderr, /Could not refresh account quotas \(HTTP 501\); showing last known readings/);
+  }, { probeStatus: 501 });
+});
+
+test('status joins an already running refresh instead of returning its old readings', async () => {
+  let status;
+  let reads = 0;
+  await withStatus(async fixture => {
+    status = fixture.status;
+    status.probe.running = true;
+    const result = await runCli(fixture.config.path, ['status', '--json']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).accounts[0].quota.unified7d, 0.88);
+    assert.equal(reads, 2);
+    assert.equal(fixture.fake.seen.filter(r => r.method === 'POST').length, 1);
+  }, { onStatus: () => {
+    if (++reads === 2) { status.probe.running = false; status.accounts[0].quota.unified7d = 0.88; }
+  } });
+});
+
+test('a failed on-demand account refresh is visible even when background probing is off', async () => {
+  let status;
+  await withStatus(async fixture => {
+    status = fixture.status;
+    const result = await runCli(fixture.config.path, ['status']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /Needs attention/);
+    assert.match(result.stdout, /quota figures are not refreshing \(HTTP 429\)/);
+    assert.doesNotMatch(result.stdout, /Updated/);
+  }, { onProbe: () => {
+    status.probe.accounts = [{ name: status.accounts[0].name, status: 'error', error: 'HTTP 429' }];
+  } });
 });
